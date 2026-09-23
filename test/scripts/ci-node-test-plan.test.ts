@@ -28,7 +28,6 @@ import {
 import {
   isCiProofTestFile,
   isReleaseOnlyRuntimeTestFile,
-  RELEASE_ONLY_RUNTIME_TEST_FILES,
 } from "../../scripts/lib/ci-proof-test-inventory.mts";
 import * as proofTestInventory from "../../scripts/lib/ci-proof-test-inventory.mts";
 import { isRuntimePlacementIncludePatterns } from "../../scripts/lib/ci-test-timings-schema.mts";
@@ -75,11 +74,13 @@ import {
 } from "../vitest/vitest.gateway-server-paths.mjs";
 import { createGatewayServerVitestConfig } from "../vitest/vitest.gateway-server.config.ts";
 import { createInfraVitestConfig } from "../vitest/vitest.infra.config.ts";
+import { createLoggingVitestConfig } from "../vitest/vitest.logging.config.ts";
 import { createMediaUnderstandingVitestConfig } from "../vitest/vitest.media-understanding.config.ts";
 import { createMediaVitestConfig } from "../vitest/vitest.media.config.ts";
 import { createPluginSdkLightVitestConfig } from "../vitest/vitest.plugin-sdk-light.config.ts";
 import { createPluginSdkVitestConfig } from "../vitest/vitest.plugin-sdk.config.ts";
 import { createPluginsVitestConfig } from "../vitest/vitest.plugins.config.ts";
+import { createProcessVitestConfig } from "../vitest/vitest.process.config.ts";
 import { createRuntimeConfigVitestConfig } from "../vitest/vitest.runtime-config.config.ts";
 import { sharedVitestConfig } from "../vitest/vitest.shared.config.ts";
 import { startupCorpusTestFiles } from "../vitest/vitest.startup-corpus-paths.mjs";
@@ -100,7 +101,11 @@ import {
 import { createUnitFastVitestConfig } from "../vitest/vitest.unit-fast.config.ts";
 import { createUnitVitestConfigWithOptions } from "../vitest/vitest.unit.config.ts";
 import { createWizardVitestConfig } from "../vitest/vitest.wizard.config.ts";
-import { listMatchedTestFiles, listTestFiles } from "./ci-node-test-plan.test-support.js";
+import {
+  expectRuntimeReleaseInventory,
+  listMatchedTestFiles,
+  listTestFiles,
+} from "./ci-node-test-plan.test-support.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
@@ -1652,8 +1657,8 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         vi.spyOn(testTimings, "readCompactGroupTimings").mockReturnValue(timings);
         vi.spyOn(testTimings, "readRuntimePlacementTimings").mockReturnValue([]);
         const options = { compactMode: "pull-request" as const, runnerBackend };
-        const select = () =>
-          createNodeTestShardBundles(options)
+        const select = (includeReleaseOnlyRuntimeTests = true) =>
+          createNodeTestShardBundles({ ...options, includeReleaseOnlyRuntimeTests })
             .flatMap((job) => job.groups)
             .filter((group) => group.shard_name.replace(/-hosted-\d+$/u, "") === owner);
         const inherited = select();
@@ -1678,11 +1683,26 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         timings[serialGeneration.timingKeys[1]!] = 500;
         expect(select()).toHaveLength(4);
         timings[`${owner}-parallel-native-serial`] = 440;
+        timings[parallelParent] = 440;
         const measured = select();
         expect(measured).toHaveLength(3);
         expect(measured.flatMap((group) => group.includePatterns!).toSorted()).toEqual(
           inherited.flatMap((group) => group.includePatterns!).toSorted(),
         );
+        const reduced = select(false);
+        expect(reduced).toHaveLength(measured.length);
+        expect(reduced.flatMap((group) => group.includePatterns!).toSorted()).toEqual(
+          measured
+            .flatMap((group) => group.includePatterns!)
+            .filter((file) => !isReleaseOnlyRuntimeTestFile(file))
+            .toSorted(),
+        );
+        expect(
+          reduced.map((group) => parseCompactSplitTimingKey(group.timing_key!)?.parentShardName),
+        ).toEqual(reduced.map(() => `changed-${parallelParent}`));
+        timings[`changed-${owner}-parallel-native-serial`] = 180;
+        expect(select(false).length).toBeLessThan(reduced.length);
+        expect(select()).toEqual(measured);
       } finally {
         fullSuiteVitestShards.splice(0, fullSuiteVitestShards.length, ...original);
       }
@@ -2680,7 +2700,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     },
   );
 
-  it("preserves each plugin project inventory when runtime consumers are partitioned", () => {
+  it("preserves scoped project inventories when plans project file selections", () => {
     const originalArgv = process.argv;
     process.argv = originalArgv.slice(0, 2);
     try {
@@ -2706,6 +2726,8 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         }
       }
       for (const { config, create } of [
+        { config: "test/vitest/vitest.logging.config.ts", create: createLoggingVitestConfig },
+        { config: "test/vitest/vitest.process.config.ts", create: createProcessVitestConfig },
         { config: "test/vitest/vitest.plugins.config.ts", create: createPluginsVitestConfig },
         { config: "test/vitest/vitest.plugin-sdk.config.ts", create: createPluginSdkVitestConfig },
         {
@@ -4095,6 +4117,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         .filter(
           (shard) =>
             shard.shardName === "core-runtime-config" ||
+            shard.shardName === "agentic-cli" ||
             shard.includePatterns?.some(isReleaseOnlyRuntimeTestFile),
         )
         .map((shard) => shard.shardName);
@@ -4107,47 +4130,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
           includeReleaseOnlyRuntimeTests: false,
           changedPaths: ["src/config/state-startup-corpus.test-support.ts"],
         });
-        const files = (plan: CompactNodeTestShard[]) =>
-          plan.flatMap((shard) => shard.groups.flatMap((group) => group.includePatterns ?? []));
-        const beforeFiles = files(before);
-        const afterFiles = files(after);
-        const fullCommandTimingParents = new Set(
-          before.flatMap((shard) =>
-            shard.groups
-              .filter((group) => group.configs.includes("test/vitest/vitest.commands.config.ts"))
-              .map((group) => {
-                const key = group.timing_key ?? group.shard_name;
-                return parseCompactSplitTimingKey(key)?.parentShardName ?? key;
-              }),
-          ),
-        );
-        expect(beforeFiles.filter((file) => !afterFiles.includes(file)).toSorted()).toEqual(
-          [...RELEASE_ONLY_RUNTIME_TEST_FILES].toSorted(),
-        );
-        expect(afterFiles.filter((file) => !beforeFiles.includes(file))).toEqual([]);
-        expect(afterFiles).toContain("src/config/config-startup-corpus.test.ts");
-        for (const owner of reducedOwners) {
-          const owns = (group: { shard_name: string }) =>
-            group.shard_name === owner || group.shard_name.startsWith(`${owner}-hosted-`);
-          const reduced = after.flatMap((shard) => shard.groups).filter(owns);
-          const retainedFiles = before
-            .flatMap((shard) => shard.groups)
-            .filter(owns)
-            .flatMap((group) => group.includePatterns ?? [])
-            .filter((file) => !isReleaseOnlyRuntimeTestFile(file));
-          expect(reduced.flatMap((group) => group.includePatterns ?? []).toSorted(), owner).toEqual(
-            retainedFiles.toSorted(),
-          );
-          for (const group of reduced) {
-            const timingKey = expectDefined(group.timing_key, "reduced runtime timing identity");
-            const timingParent =
-              parseCompactSplitTimingKey(timingKey)?.parentShardName ?? timingKey;
-            expect(fullCommandTimingParents.has(timingParent), `${owner}: ${timingParent}`).toBe(
-              false,
-            );
-            expect(timingParent.replace(/#file-parallel-(?:2|8)$/u, "")).toBe(`changed-${owner}`);
-          }
-        }
+        expectRuntimeReleaseInventory({ before, after, reducedOwners, compactMode });
       }
     },
   );
@@ -5327,6 +5310,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
       shard.shardName.startsWith("core-runtime-infra-"),
     );
     const actual = infraShards
+      .filter((shard) => shard.configs.includes("test/vitest/vitest.infra.config.ts"))
       .flatMap((shard) => shard.includePatterns ?? [])
       .toSorted((a, b) => a.localeCompare(b));
 
