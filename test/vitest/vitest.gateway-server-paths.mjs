@@ -1,5 +1,6 @@
 // Plugin integration tests retain Gateway runtime setup outside core source.
 export const gatewayPluginTestFiles = [
+  "test/plugins/chat-abort-codex.gateway.test.ts",
   "test/plugins/codex-model-catalog.gateway.test.ts",
   "test/plugins/crabbox-allocation-authority.gateway.test.ts",
   "test/plugins/team-reports-http.gateway.test.ts",
@@ -7,6 +8,7 @@ export const gatewayPluginTestFiles = [
 
 // Native database consumers retain lifecycle cleanup within each forked process.
 export const gatewayDatabaseWorkerTestFiles = [
+  "test/plugins/chat-abort-codex.gateway.test.ts",
   "src/gateway/agent-turn/agent-run-dispatch.execution-binding.test.ts",
   "src/gateway/agent-turn/agent-run-dispatch.sqlite.test.ts",
   "src/gateway/approval-fixture.test.ts",

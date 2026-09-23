@@ -5,6 +5,7 @@ import { resolveRuntimeWorkerUrl } from "../../infra/runtime-worker-url.js";
 import { createSqliteLifecycleAggregateError } from "../../infra/sqlite-coordinator.js";
 import type { SqliteWorkerStore } from "../../infra/sqlite-worker-store.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { attachSessionTranscriptRunId } from "../../sessions/transcript-events.js";
 import {
   runOpenClawAgentWriteTransaction,
   withOpenClawAgentDatabaseAsync,
@@ -32,10 +33,13 @@ import {
 } from "./session-accessor.sqlite-scope.js";
 import { prepareTranscriptMessageAppend } from "./session-accessor.sqlite-transcript-message-append.js";
 import {
+  appendAbortedSessionTranscriptPartialInTransaction,
   appendSelectedTranscriptReportInTransaction,
   prepareCustomTranscriptReport,
   prepareTranscriptReportSelection,
   type CustomMessageReport,
+  type AbortedSessionTranscriptPartial,
+  type AbortedSessionTranscriptPartialResult,
   type TranscriptReport,
 } from "./session-accessor.sqlite-transcript-reports.kernel.js";
 import type {
@@ -134,7 +138,11 @@ async function withReportWorker<T>(
   run: (
     operation: Pick<SqliteWorkerStore<TranscriptReportWorkerOperations>, "execute">,
     assertCurrent: () => void,
-    publish: (result: { projectionNeedsReconcile: boolean; cliHistoryChanged?: boolean }) => void,
+    publish: (result: {
+      projectionNeedsReconcile: boolean;
+      cliHistoryChanged?: boolean;
+      sessionEntryChanged?: boolean;
+    }) => void,
   ) => Promise<Result<T, TranscriptAppendRefusal>>,
 ): Promise<Result<T, TranscriptAppendRefusal>> {
   // Preserve the logical target for live authority and pin the physical owner before yielding.
@@ -196,7 +204,7 @@ async function withReportWorker<T>(
                     worker.run(
                       (operation) =>
                         run(operation, assertCurrent, (publication) => {
-                          if (publication.cliHistoryChanged) {
+                          if (publication.cliHistoryChanged || publication.sessionEntryChanged) {
                             publishSessionEntryCacheInvalidation(database, {
                               sessionKey: resolved.sessionKey,
                               facts: { kind: "unchanged" },
@@ -239,6 +247,48 @@ function isProcessHeldTranscript(scope: SessionTranscriptWriteScope): boolean {
     resolveOpenClawAgentSqlitePath(toDatabaseOptions(resolved)),
     toDatabaseOptions(resolved),
   );
+}
+
+/** Fills a hot transcript only when its settled registered producer left no authoritative answer. */
+export async function appendAbortedSessionTranscriptPartial(
+  scope: SessionTranscriptWriteScope & { sessionId: string },
+  partial: AbortedSessionTranscriptPartial & {
+    config?: import("../types.openclaw.js").OpenClawConfig;
+  },
+): Promise<Result<AbortedSessionTranscriptPartialResult, TranscriptAppendRefusal>> {
+  const { config, ...input } = partial;
+  const preparedMessage = prepareTranscriptMessageAppend({
+    message: attachSessionTranscriptRunId(partial.message, partial.runId),
+    config,
+  });
+  if (!preparedMessage || preparedMessage.persistedMessage.role !== "assistant") {
+    throw new Error("Aborted partial requires prepared assistant storage bytes");
+  }
+  if (isProcessHeldTranscript(scope)) {
+    return withNativeCurrentTranscript(scope, (database, resolved) =>
+      appendAbortedSessionTranscriptPartialInTransaction(
+        database,
+        resolved,
+        input,
+        preparedMessage,
+      ),
+    );
+  }
+  return withReportWorker(scope, "append", async (operation, _assertCurrent, publish) => {
+    const result = await operation.execute({
+      type: "abortedPartial",
+      input: { ...input, message: preparedMessage.persistedMessage, preparedMessage },
+    });
+    if (!result.ok) {
+      return result;
+    }
+    const receipt = result.value.abortedPartial;
+    if (!receipt) {
+      throw new Error("Aborted partial worker returned no settlement receipt");
+    }
+    publish(result.value);
+    return ok(receipt);
+  });
 }
 
 /** Reads the latest matching custom report from the active branch in one snapshot. */

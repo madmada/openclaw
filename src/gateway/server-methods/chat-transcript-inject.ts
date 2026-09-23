@@ -2,11 +2,13 @@
 // preserving agent-session parent links and transcript update notifications.
 import type { SessionManager } from "../../agents/sessions/session-manager.js";
 import { persistSessionTranscriptTurn } from "../../config/sessions/session-accessor.js";
+import { appendAbortedSessionTranscriptPartial } from "../../config/sessions/session-accessor.sqlite-transcript-reports.js";
 import type { SessionLifecycleRevisionExpectation } from "../../config/sessions/session-transcript-turn-lifecycle.types.js";
 import { applyAssistantDeliveryDirectives } from "../../config/sessions/transcript-assistant-delivery.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import {
+  emitSessionTranscriptUpdate,
   readSessionTranscriptRunId,
   resolveTerminalAssistantTranscriptRunId,
 } from "../../sessions/transcript-events.js";
@@ -24,6 +26,8 @@ type GatewayInjectedAbortMeta = {
   aborted: true;
   origin: "rpc" | "stop-command" | "placement-abandon";
   runId: string;
+  /** The registered native producer has finished its canonical transcript writes. */
+  producerSettled?: true;
 };
 
 /** Result shape returned after appending an assistant row to a session transcript. */
@@ -156,6 +160,47 @@ export async function appendInjectedAssistantMessageToTranscript(params: {
   try {
     if (!params.transcriptPath && (!params.storePath || !params.sessionId || !params.sessionKey)) {
       return { ok: false, error: "transcript identity not resolved" };
+    }
+    if (params.abortMeta?.producerSettled) {
+      if (!params.storePath || !params.sessionId || !params.sessionKey) {
+        return { ok: false, error: "settled producer transcript identity not resolved" };
+      }
+      const scope = {
+        storePath: params.storePath,
+        sessionId: params.sessionId,
+        sessionKey: params.sessionKey,
+        ...(params.agentId ? { agentId: params.agentId } : {}),
+      };
+      const result = await appendAbortedSessionTranscriptPartial(scope, {
+        runId: params.abortMeta.runId,
+        message: messageBody,
+        expectedLifecycleRevision: params.expectedLifecycleRevision,
+        now,
+        config: params.config,
+      });
+      if (!result.ok) {
+        return { ok: false, error: result.error.code };
+      }
+      if (result.value.skipped) {
+        return { ok: true, skipped: true };
+      }
+      const { append, lifecycleRevision, messageSeq } = result.value;
+      if (append.appended) {
+        emitSessionTranscriptUpdate({
+          ...scope,
+          ...(params.agentId ? { target: { ...scope, agentId: params.agentId } } : {}),
+          lifecycleRevision,
+          messageSeq,
+          message: append.message,
+          messageId: append.messageId,
+          runId: params.abortMeta.runId,
+        });
+      }
+      return {
+        ok: true,
+        messageId: append.messageId,
+        message: projectAssistantDisplayContent(append.message),
+      };
     }
     let predicateDeclined = false;
     const turn = await persistSessionTranscriptTurn(

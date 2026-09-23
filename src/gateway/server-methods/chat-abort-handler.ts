@@ -34,6 +34,7 @@ import {
 import {
   abortedPartialPersistenceError,
   captureAbortedPartial,
+  deferAbortedPartialPersistence,
   withAbortedPartialPersistenceWarning,
 } from "./chat-aborted-partial.js";
 import {
@@ -405,6 +406,7 @@ export async function handleChatAbortRequestWithLifecycle(
           agentId: agentId ?? abortAgentId,
           text: partialText,
           abortOrigin: "rpc",
+          resolveTerminalProducer: active.resolveTerminalProducer,
           ...(sessionKey === rawSessionKey || sessionKey === canonicalAbortSessionKey
             ? { session: abortSession }
             : {}),
@@ -431,7 +433,15 @@ export async function handleChatAbortRequestWithLifecycle(
         ) {
           throw new Error("Run changed before cancellation; retry Stop.");
         }
-        return (aborted = abortChatRunById(ops, { runId, sessionKey, stopReason: "rpc" }).aborted);
+        return abortChatRunById(ops, {
+          runId,
+          sessionKey,
+          stopReason: "rpc",
+          onAbortCommitted: () => {
+            aborted = true;
+            deferAbortedPartialPersistence(snapshot, context);
+          },
+        }).aborted;
       },
     });
   } catch (error) {
