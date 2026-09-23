@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   observeHostDataSql,
@@ -172,7 +173,17 @@ describe("exec approval signed agent runtime", () => {
         const instance = createOperationalRunInstanceRef(claim.runId);
         const delegated = claimAgentRunDelegatedAuthority(instance);
         try {
-          await bindWorkerTurnOwner(placements, claim, undefined, instance, source, () => {});
+          await bindWorkerTurnOwner(
+            placements,
+            claim,
+            undefined,
+            instance,
+            {
+              ...source,
+              storePath: path.join(fixture.databaseOptions.env.OPENCLAW_STATE_DIR, "sessions.json"),
+            },
+            () => {},
+          );
           validate = createAgentRuntimeApprovalAuthorityValidator(placements);
           const runtimeIdentity: AgentRuntimeIdentity = {
             kind: "agentRuntime",

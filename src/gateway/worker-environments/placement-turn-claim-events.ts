@@ -4,6 +4,7 @@ import type {
   AdmittedRunOperatorAuthority,
   OperationalRunInstanceRef,
 } from "../../agents/admitted-run-context.js";
+import type { BoundAgentRunSessionTarget } from "../../agents/run-session-target.types.js";
 import type { ExecutionIdentityAdmissionToken } from "../../audit/execution-identity-admission.js";
 import type { PrepareAssistantTranscriptMessage } from "../../config/sessions/transcript-assistant-delivery.js";
 import {
@@ -56,12 +57,19 @@ export type WorkerTurnExecutionIdentity = Readonly<{
   operatorAuthority?: AdmittedRunOperatorAuthority;
   receiptAuthority: () => void;
   sessionKey: string;
+  sessionTarget: Readonly<BoundAgentRunSessionTarget>;
   turnClaim: WorkerSessionTurnClaim;
 }>;
 
-export type WorkerTurnExecutionIdentityCapability = Readonly<{
-  run<T>(callback: (identity: WorkerTurnExecutionIdentity) => Promise<T> | T): Promise<T>;
-}>;
+export type WorkerTurnTranscriptSource = Pick<
+  WorkerTurnExecutionIdentity,
+  "sessionTarget" | "receiptAuthority"
+>;
+
+export type WorkerTurnExecutionIdentityCapability = WorkerTurnTranscriptSource &
+  Readonly<{
+    run<T>(callback: (identity: WorkerTurnExecutionIdentity) => Promise<T> | T): Promise<T>;
+  }>;
 
 type WorkerTurnFinishingOutcome = { error?: string; replayInvalid?: true };
 
@@ -121,13 +129,18 @@ export async function bindWorkerTurnOwner(
   requestedClaim: WorkerSessionTurnClaim,
   token: ExecutionIdentityAdmissionToken | undefined,
   operationalRunInstance: OperationalRunInstanceRef,
-  requestedSource: { agentId: string; sessionKey: string },
+  requestedSource: BoundAgentRunSessionTarget,
   assertRunActive: () => void,
   prepareAssistantTranscriptMessage?: PrepareAssistantTranscriptMessage,
   operatorAuthority?: AdmittedRunOperatorAuthority,
-): Promise<(credentialHash: string) => WorkerTurnFinishingOutcome | undefined> {
+): Promise<
+  Readonly<{
+    capability: WorkerTurnExecutionIdentityCapability;
+    takeFinishingOutcome: (credentialHash: string) => WorkerTurnFinishingOutcome | undefined;
+  }>
+> {
   let claim = structuredClone(requestedClaim);
-  const source = { ...requestedSource };
+  const sessionTarget = Object.freeze({ ...requestedSource });
   const scope = captureGatewayRootWorkAdmissionContinuationScope();
   const path = store[WORKER_TURN_EXECUTION_IDENTITY_PATH];
   const delegatedAuthority = getActiveAgentRunDelegatedAuthority(operationalRunInstance);
@@ -137,17 +150,23 @@ export async function bindWorkerTurnOwner(
   }
   let claimAuthority: PlacementTurnClaimAuthority | undefined;
   try {
-    claimAuthority = await store.prepareTurnClaimAuthority(claim);
+    const prepared = await store.prepareTurnClaimAuthority(claim);
+    claimAuthority = prepared;
+    const assertPreparedCurrent = () => {
+      if (
+        !prepared.isCurrent() ||
+        !validateAgentRunDelegatedAuthority(delegatedAuthority) ||
+        sessionTarget.sessionId !== claim.sessionId ||
+        prepared.identity.agentId !== sessionTarget.agentId ||
+        prepared.identity.sessionKey !== sessionTarget.sessionKey
+      ) {
+        throw new Error(`Session ${claim.sessionId} worker turn authority changed`);
+      }
+    };
+    assertPreparedCurrent();
     assertRunActive();
     operatorAuthority?.assertCurrent();
-    if (
-      !claimAuthority.isCurrent() ||
-      !validateAgentRunDelegatedAuthority(delegatedAuthority) ||
-      claimAuthority.identity.agentId !== source.agentId ||
-      claimAuthority.identity.sessionKey !== source.sessionKey
-    ) {
-      throw new Error(`Session ${claim.sessionId} worker turn authority changed`);
-    }
+    assertPreparedCurrent();
   } catch (error) {
     claimAuthority?.release();
     scope?.release();
@@ -156,9 +175,7 @@ export async function bindWorkerTurnOwner(
   const authority = claimAuthority;
   claim = authority.claim;
   const owners = workerTurnOwners.get(path) ?? new Map();
-  const assertActive = () => {
-    assertRunActive();
-    operatorAuthority?.assertCurrent();
+  const assertOwnerCurrent = () => {
     if (
       owners.get(claim.sessionId) !== owner ||
       workerTurnOwners.get(path) !== owners ||
@@ -168,17 +185,27 @@ export async function bindWorkerTurnOwner(
       throw new Error(`Session ${claim.sessionId} worker turn authority changed`);
     }
   };
+  const assertActive = () => {
+    // A closed claim must not consult its retired source. Callbacks can also revoke it.
+    assertOwnerCurrent();
+    assertRunActive();
+    operatorAuthority?.assertCurrent();
+    assertOwnerCurrent();
+  };
   const identity = Object.freeze({
-    agentId: source.agentId,
+    agentId: sessionTarget.agentId,
     delegatedAuthority,
     ...(token ? { executionIdentityToken: token } : {}),
     operationalRunInstance,
     ...(operatorAuthority ? { operatorAuthority } : {}),
     receiptAuthority: assertActive,
-    sessionKey: source.sessionKey,
+    sessionKey: sessionTarget.sessionKey,
+    sessionTarget,
     turnClaim: claim,
   });
   const capability = Object.freeze({
+    sessionTarget,
+    receiptAuthority: assertActive,
     async run<T>(callback: (current: WorkerTurnExecutionIdentity) => Promise<T> | T): Promise<T> {
       assertActive();
       const result = await callback(identity);
@@ -222,7 +249,7 @@ export async function bindWorkerTurnOwner(
     closeOwner();
     throw error;
   }
-  return (credentialHash) => {
+  const takeFinishingOutcome = (credentialHash: string) => {
     assertActive();
     const finishing = owner.runtime.finishing;
     if (
@@ -235,6 +262,7 @@ export async function bindWorkerTurnOwner(
     owner.runtime.finishing = undefined;
     return finishing.outcome;
   };
+  return Object.freeze({ capability, takeFinishingOutcome });
 }
 
 export function getWorkerTurnExecutionIdentityCapability(

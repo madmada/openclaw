@@ -734,6 +734,11 @@ describe("dedicated worker websocket protocol", () => {
           placements,
           runtimeInstanceId: identity.environmentId,
           sessionKey: session.sessionKey,
+          sessionTarget: {
+            ...session,
+            storePath: path.join(stateDir, "agents", "main", "sessions", "sessions.json"),
+          },
+          assertSourceCurrent: () => {},
           turn: {
             preparedRunAdmission,
             runId: claim.runId,

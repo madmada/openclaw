@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { DecisionReceiptV1 } from "../../../packages/gateway-protocol/src/index.js";
 import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
@@ -160,7 +161,12 @@ describe("worker environment service", () => {
         now: 100,
       }),
       operationalRun,
-      { agentId: "main", sessionKey: `agent:main:${sessionId}` },
+      {
+        agentId: "main",
+        sessionId,
+        sessionKey: `agent:main:${sessionId}`,
+        storePath: path.join(support.testState.root, "sessions.json"),
+      },
       () => {},
     );
     const gate = createWorkerSessionPlacementGate(store);
@@ -236,7 +242,12 @@ describe("worker environment service", () => {
         now: 100,
       }),
       firstOperationalRun,
-      { agentId: "main", sessionKey: `agent:main:${sessionId}` },
+      {
+        agentId: "main",
+        sessionId,
+        sessionKey: `agent:main:${sessionId}`,
+        storePath: path.join(support.testState.root, "sessions.json"),
+      },
       () => {},
     );
     const installation = createDeferredCore<typeof support.BUNDLE_ARTIFACT>();
@@ -287,7 +298,12 @@ describe("worker environment service", () => {
           now: 101,
         }),
         secondOperationalRun,
-        { agentId: "main", sessionKey: `agent:main:${sessionId}` },
+        {
+          agentId: "main",
+          sessionId,
+          sessionKey: `agent:main:${sessionId}`,
+          storePath: path.join(support.testState.root, "sessions.json"),
+        },
         () => {},
       );
       installation.resolve(support.BUNDLE_ARTIFACT);
@@ -485,6 +501,31 @@ describe("worker environment service", () => {
       workerCredentialTtlMs: 20,
     });
     const admitClaim = async (claim: WorkerSessionTurnClaim) => {
+      const instance = createOperationalRunInstanceRef(claim.runId);
+      const authority = claimAgentRunDelegatedAuthority(instance);
+      support.testState.releaseTurnOwners.push(() => {
+        if (store.validateTurnClaim(claim)) {
+          store.releaseTurn(claim);
+        }
+        releaseAgentRunDelegatedAuthority(authority);
+      });
+      await bindWorkerTurnOwner(
+        store,
+        claim,
+        undefined,
+        instance,
+        {
+          agentId: "main",
+          sessionId,
+          sessionKey: `agent:main:${sessionId}`,
+          storePath: path.join(support.testState.root, "sessions.json"),
+        },
+        () => {
+          if (!store.validateTurnClaim(claim)) {
+            throw new Error("inference fixture claim is no longer current");
+          }
+        },
+      );
       const credential = await workerService.acquireTurnCredential(claim);
       const admitted = await workerService.admitWorker({
         environmentId,

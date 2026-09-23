@@ -107,6 +107,13 @@ their existing transaction boundary; moving those mutations and internal opaque
 approval carriers to workers remains separate work. External opaque SDK guards,
 stored rows, schemas, permissions, and update behavior are unchanged.
 
+Worker binding captures the complete original session target before preparing its
+claim authority. The bound identity and transcript capability retain that same
+store, lifecycle revision, and writer identity. Source validation still uses the
+session accessor's synchronous row check; moving that separate owner to prepared
+async custody remains follow-up work. The retained placement claim checks do not
+repeat the placement row read inside that source guard.
+
 Placement activation and prepared-environment consumption retain their existing
 synchronous atomic parent transactions. Node pairing uses its existing write
 worker and carries inventory changes in its committed receipt. All three publish
@@ -579,6 +586,11 @@ agent IDs; tree and Gateway output retain full ordered enumeration and enum
 validation. Cold reads retain database creation and feature schema initialization.
 Synchronous incarnation checks, provenance writes, and connection-bound deletion
 remain with their lifecycle owners; collection and retention are unchanged.
+Incarnation checks read current committed rows without joining a worker's writer
+lock or inheriting a discovery snapshot. They do not create state or ensure
+schema: absent optional provenance remains empty, while a missing mandatory
+deletion journal or malformed state refuses authority. Writers retain schema
+initialization.
 
 Memory-host event appends and bounded journal reads execute on the shared state
 worker. The plugin-state owner allocates the sequence, rereads the cursor and

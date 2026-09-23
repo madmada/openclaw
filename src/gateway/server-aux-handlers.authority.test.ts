@@ -403,6 +403,9 @@ describe("gateway auxiliary authority lifecycle", () => {
   });
 
   it("settles and publishes both approval kinds from the production worker-claim observer", async () => {
+    if (!fixture) {
+      throw new Error("expected Gateway authority fixture");
+    }
     const database = openOpenClawStateDatabase();
     const placements = createWorkerSessionPlacementStore({ database });
     const identity = {
@@ -471,7 +474,7 @@ describe("gateway auxiliary authority lifecycle", () => {
       turnClaim,
       undefined,
       operationalRunInstance,
-      identity,
+      { ...identity, storePath: fixture.statePath("agents", "main", "sessions", "sessions.json") },
       () => {},
     );
     const validateAuthority = createAgentRuntimeApprovalAuthorityValidator(placements);

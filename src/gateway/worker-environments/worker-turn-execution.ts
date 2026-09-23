@@ -109,16 +109,26 @@ export async function executeWorkerTurn(
   turn.onExecutionPhase?.({ phase: "runner_entered", backend: "cloud-worker" });
   const transcriptTarget = resolveWorkerTurnTranscriptTarget(turn);
   const recorder = turn.userTurnTranscriptRecorder;
-  const assertContextCurrent = () => {
+  const assertTurnInputCurrent = () => {
     params.assertRunCurrent?.();
     turn.abortSignal?.throwIfAborted();
     if (recorder?.isBlocked()) {
       throw new Error("Cloud worker turn input is blocked");
     }
+  };
+  const assertTranscriptCurrent = () => {
+    resolveWorkerTurnTranscriptTarget({ ...transcriptTarget, sessionTarget: transcriptTarget });
+  };
+  const assertSourceCurrent = () => {
+    assertTurnInputCurrent();
+    assertTranscriptCurrent();
+  };
+  const assertContextCurrent = () => {
+    assertTurnInputCurrent();
     if (!params.placements.validateTurnClaim(params.turnClaim)) {
       throw new Error("Worker turn claim changed during context preparation");
     }
-    resolveWorkerTurnTranscriptTarget({ ...transcriptTarget, sessionTarget: transcriptTarget });
+    assertTranscriptCurrent();
   };
   assertContextCurrent();
   if (recorder?.hasRuntimePersistencePending()) {
@@ -216,6 +226,8 @@ export async function executeWorkerTurn(
       runtimeInstanceId: placement.environmentId,
       placements: params.placements,
       sessionKey: placement.sessionKey,
+      sessionTarget: transcriptTarget,
+      assertSourceCurrent,
       turn,
       turnClaim: params.turnClaim,
     });
@@ -246,7 +258,6 @@ export async function executeWorkerTurn(
         signal.throwIfAborted();
         const current = params.environments.get(placement.environmentId);
         return (
-          params.placements.validateTurnClaim(params.turnClaim) &&
           current?.state === "attached" &&
           current.ownerEpoch === placement.activeOwnerEpoch &&
           current.attachedSessionIds.length === 1 &&
@@ -368,7 +379,7 @@ export async function executeWorkerTurn(
     }
     // Presence belongs to the Gateway; workers cannot read its process-local node registry.
     await prepareActiveNodeContext();
-    assertContextCurrent();
+    assertActive();
     const systemPrompt = [
       turn.extraSystemPrompt,
       buildActiveNodeContextText(),
