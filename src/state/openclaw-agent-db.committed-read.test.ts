@@ -137,23 +137,32 @@ describe("committed agent database reads", () => {
       sql: "UPDATE schema_meta SET agent_id = 'other' WHERE meta_key = 'primary'",
       error: /belongs to agent other.*requested agent main/,
     },
-  ])("rechecks committed $name before invoking a retained reader", async ({ sql, error }) => {
-    await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
-      const options = { agentId: "main", env };
-      const owner = openOpenClawAgentDatabase(options);
-      inWriterTransaction(owner.db, () => expect(readStamp(options).db.isOpen).toBe(true));
-      owner.db.exec(sql);
-      let invoked = false;
-      inWriterTransaction(owner.db, () => {
-        expect(() =>
-          withOpenClawAgentDatabaseReadOnly(() => {
-            invoked = true;
-          }, options),
-        ).toThrow(error);
+  ])(
+    "rechecks committed $name on the next turn before invoking a retained reader",
+    async ({ sql, error }) => {
+      await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
+        const options = { agentId: "main", env };
+        const owner = openOpenClawAgentDatabase(options);
+        vi.useFakeTimers({ toFake: ["setImmediate"] });
+        try {
+          inWriterTransaction(owner.db, () => expect(readStamp(options).db.isOpen).toBe(true));
+          owner.db.exec(sql);
+          vi.runOnlyPendingTimers();
+          let invoked = false;
+          inWriterTransaction(owner.db, () => {
+            expect(() =>
+              withOpenClawAgentDatabaseReadOnly(() => {
+                invoked = true;
+              }, options),
+            ).toThrow(error);
+          });
+          expect(invoked).toBe(false);
+        } finally {
+          vi.useRealTimers();
+        }
       });
-      expect(invoked).toBe(false);
-    });
-  });
+    },
+  );
 
   it("preserves missing-schema adaptation after the reader was retained", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async ({ env }) => {
