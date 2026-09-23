@@ -1,3 +1,4 @@
+import type { ProvidedContext } from "vitest";
 import type { ControlUiBuildInfo } from "../build-info-types.ts";
 
 export type ControlUiE2eBuildIdentity = Pick<ControlUiBuildInfo, "buildId" | "version">;
@@ -13,7 +14,7 @@ declare module "vitest" {
 
 let sharedPreview: {
   baseUrl: string;
-  buildInfo: ControlUiE2eBuildIdentity | null;
+  buildInfo: NonNullable<ProvidedContext["controlUiE2ePrebuiltAssets"]>["buildInfo"] | null;
 } | null = null;
 
 export function getSharedControlUiE2ePreview() {
