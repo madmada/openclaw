@@ -93,9 +93,7 @@ function captureLeaseWorkerSource(context: OpenClawStateWorkerContext, databaseP
   const sourceEnvironment = { ...environment };
   const sourceCoordinatorRuntime = { ...coordinatorRuntime };
   const assertAdmission = admission.assertCurrent;
-  // oxlint-disable-next-line typescript/unbound-method -- Preserve method identity and invoke it with the original receiver below.
   const assertMaintenance = maintenanceScope?.assertAdmission;
-  // oxlint-disable-next-line typescript/unbound-method -- The captured admission method calls this exact owner delegate.
   const assertMaintenanceOwner = maintenanceScope?.assertOwnerCurrent;
   return () => {
     if (
@@ -114,8 +112,8 @@ function captureLeaseWorkerSource(context: OpenClawStateWorkerContext, databaseP
     ) {
       throw new Error("State lease worker source binding was replaced");
     }
-    assertMaintenance?.call(maintenanceScope);
-    assertAdmission.call(admission);
+    assertMaintenance?.();
+    assertAdmission();
   };
 }
 
