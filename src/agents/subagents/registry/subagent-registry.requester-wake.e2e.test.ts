@@ -907,7 +907,26 @@ describe("requester settle wake product flow", () => {
             await yieldTurn(initialRequesterTurnRunId, [alpha]);
             attachment?.releaseProvisional();
             emitCompleted(alpha.runId, alpha.childSessionKey, "alpha findings");
+            await vi.dynamicImportSettled();
             await vi.waitFor(() => expect(firstWakeReturned).toBe(true));
+            if (!acceptNextChild) {
+              const wake = vi.mocked(maybeWakeRequesterAfterAllChildrenSettled);
+              const entry = registry.getSubagentRunByRunId(alpha.runId);
+              const attemptIndex = wake.mock.calls.findLastIndex(
+                ([params]) => params.settledEntry === entry,
+              );
+              const attempt = wake.mock.results[attemptIndex];
+              if (!attempt || attempt.type !== "return") {
+                throw new Error("Missing requester wake attempt for the current alpha run");
+              }
+              // The worker receipt read settles after the Gateway response.
+              await attempt.value;
+              expect(entry?.requesterSettleWake).toMatchObject({
+                status: "pending",
+                attemptCount: 1,
+                nextAttemptAt: expect.any(Number),
+              });
+            }
             await vi.advanceTimersByTimeAsync(0);
             expect(getRequesterWakeCalls()).toHaveLength(1);
             expect(visibleFinals).toBe(0);
