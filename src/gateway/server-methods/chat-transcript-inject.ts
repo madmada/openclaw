@@ -8,7 +8,6 @@ import { applyAssistantDeliveryDirectives } from "../../config/sessions/transcri
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import {
-  emitSessionTranscriptUpdate,
   readSessionTranscriptRunId,
   resolveTerminalAssistantTranscriptRunId,
 } from "../../sessions/transcript-events.js";
@@ -184,18 +183,7 @@ export async function appendInjectedAssistantMessageToTranscript(params: {
       if (result.value.skipped) {
         return { ok: true, skipped: true };
       }
-      const { append, lifecycleRevision, messageSeq } = result.value;
-      if (append.appended) {
-        emitSessionTranscriptUpdate({
-          ...scope,
-          ...(params.agentId ? { target: { ...scope, agentId: params.agentId } } : {}),
-          lifecycleRevision,
-          messageSeq,
-          message: append.message,
-          messageId: append.messageId,
-          runId: params.abortMeta.runId,
-        });
-      }
+      const { append } = result.value;
       return {
         ok: true,
         messageId: append.messageId,

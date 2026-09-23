@@ -1,8 +1,9 @@
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { AssistantMessage } from "../../llm/types.js";
 import { registerSecretValueForRedaction } from "../../logging/secret-redaction-registry.js";
 import { resetSecretRedactionRegistryForTest } from "../../logging/secret-redaction-registry.test-support.js";
+import { onInternalSessionTranscriptUpdate } from "../../sessions/transcript-events.js";
 import {
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
@@ -111,6 +112,8 @@ describe("SQLite report payload selection", () => {
       };
       const before = transcriptSnapshot(db);
       const hostTransactions = vi.spyOn(db, "exec");
+      const onUpdate = vi.fn();
+      onTestFinished(onInternalSessionTranscriptUpdate(onUpdate));
       for (const expectedLifecycleRevision of [null, "previous-lifecycle"]) {
         await expect(
           appendAbortedSessionTranscriptPartial(scope, {
@@ -119,6 +122,7 @@ describe("SQLite report payload selection", () => {
           }),
         ).rejects.toThrow("session writer claim changed before transcript persistence");
         expect(transcriptSnapshot(db)).toEqual(before);
+        expect(onUpdate).not.toHaveBeenCalled();
       }
       const result = await appendAbortedSessionTranscriptPartial(scope, {
         ...partial,
@@ -132,6 +136,28 @@ describe("SQLite report payload selection", () => {
           append: { appended: true, message: { __openclaw: { runId: "stopped-run" } } },
         },
       });
+      if (!result.ok || result.value.skipped) {
+        throw new Error("Expected a committed fallback receipt");
+      }
+      expect(onUpdate).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          ...scope,
+          target: expect.objectContaining(scope),
+          lifecycleRevision: result.value.lifecycleRevision,
+          messageSeq: result.value.messageSeq,
+          message: result.value.append.message,
+          messageId: result.value.append.messageId,
+          runId: partial.runId,
+        }),
+      );
+      onUpdate.mockClear();
+      await expect(
+        appendAbortedSessionTranscriptPartial(scope, {
+          ...partial,
+          expectedLifecycleRevision: "current-lifecycle",
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      expect(onUpdate).not.toHaveBeenCalled();
       expect(hostTransactions.mock.calls.some(([sql]) => /^BEGIN\s+IMMEDIATE/i.test(sql))).toBe(
         false,
       );
@@ -205,6 +231,7 @@ describe("SQLite report payload selection", () => {
           appendSessionTranscriptReport(scope, { kind: "assistant", message: nativeMessage }),
         ).resolves.toMatchObject({ ok: true });
         const committed = transcriptSnapshot(db);
+        onUpdate.mockClear();
         const settled = await appendAbortedSessionTranscriptPartial(scope, {
           runId,
           message: { ...assistant, idempotencyKey: `${runId}:assistant` },
@@ -217,6 +244,7 @@ describe("SQLite report payload selection", () => {
             : { skipped: false, append: { appended: true, message: { __openclaw: { runId } } } },
         });
         const after = transcriptSnapshot(db);
+        expect(onUpdate, partition.name).toHaveBeenCalledTimes(partition.skipped ? 0 : 1);
         if (partition.skipped) {
           expect(after, partition.name).toEqual(committed);
         } else {
@@ -234,6 +262,7 @@ describe("SQLite report payload selection", () => {
         updatedAt: 1,
       });
       hostTransactions.mockClear();
+      onUpdate.mockClear();
       const beforeSuccessorFallback = transcriptSnapshot(db);
       await expect(
         appendAbortedSessionTranscriptPartial(scope, {
@@ -250,6 +279,7 @@ describe("SQLite report payload selection", () => {
         }),
       ).resolves.toEqual({ ok: true, value: { skipped: true } });
       expect(transcriptSnapshot(db)).toEqual(beforeSuccessorFallback);
+      expect(onUpdate).not.toHaveBeenCalled();
       expect(hostTransactions.mock.calls.some(([sql]) => /^BEGIN\s+IMMEDIATE/i.test(sql))).toBe(
         false,
       );

@@ -24,6 +24,7 @@ import type {
 } from "./session-accessor.sqlite-contract.js";
 import { publishSessionEntryCacheInvalidation } from "./session-accessor.sqlite-entry-cache.js";
 import { readSessionEntryRow } from "./session-accessor.sqlite-entry-store.js";
+import { publishTranscriptUpdate } from "./session-accessor.sqlite-events.js";
 import {
   captureLifecycleDatabaseScope,
   resolveSqliteTranscriptScope,
@@ -256,6 +257,7 @@ export async function appendAbortedSessionTranscriptPartial(
     config?: import("../types.openclaw.js").OpenClawConfig;
   },
 ): Promise<Result<AbortedSessionTranscriptPartialResult, TranscriptAppendRefusal>> {
+  const publicationScope = { ...scope };
   const { config, ...input } = partial;
   const preparedMessage = prepareTranscriptMessageAppend({
     message: attachSessionTranscriptRunId(partial.message, partial.runId),
@@ -264,31 +266,45 @@ export async function appendAbortedSessionTranscriptPartial(
   if (!preparedMessage || preparedMessage.persistedMessage.role !== "assistant") {
     throw new Error("Aborted partial requires prepared assistant storage bytes");
   }
-  if (isProcessHeldTranscript(scope)) {
-    return withNativeCurrentTranscript(scope, (database, resolved) =>
-      appendAbortedSessionTranscriptPartialInTransaction(
-        database,
-        resolved,
-        input,
-        preparedMessage,
-      ),
-    );
-  }
-  return withReportWorker(scope, "append", async (operation, _assertCurrent, publish) => {
-    const result = await operation.execute({
-      type: "abortedPartial",
-      input: { ...input, message: preparedMessage.persistedMessage, preparedMessage },
+  const settlement = isProcessHeldTranscript(publicationScope)
+    ? await withNativeCurrentTranscript(publicationScope, (database, resolved) =>
+        appendAbortedSessionTranscriptPartialInTransaction(
+          database,
+          resolved,
+          input,
+          preparedMessage,
+        ),
+      )
+    : await withReportWorker(
+        publicationScope,
+        "append",
+        async (operation, _assertCurrent, publish) => {
+          const result = await operation.execute({
+            type: "abortedPartial",
+            input: { ...input, message: preparedMessage.persistedMessage, preparedMessage },
+          });
+          if (!result.ok) {
+            return result;
+          }
+          const receipt = result.value.abortedPartial;
+          if (!receipt) {
+            throw new Error("Aborted partial worker returned no settlement receipt");
+          }
+          publish(result.value);
+          return ok(receipt);
+        },
+      );
+  if (settlement.ok && !settlement.value.skipped && settlement.value.append.appended) {
+    const { append, lifecycleRevision, messageSeq } = settlement.value;
+    await publishTranscriptUpdate(publicationScope, {
+      lifecycleRevision,
+      messageSeq,
+      message: append.message,
+      messageId: append.messageId,
+      runId: input.runId,
     });
-    if (!result.ok) {
-      return result;
-    }
-    const receipt = result.value.abortedPartial;
-    if (!receipt) {
-      throw new Error("Aborted partial worker returned no settlement receipt");
-    }
-    publish(result.value);
-    return ok(receipt);
-  });
+  }
+  return settlement;
 }
 
 /** Reads the latest matching custom report from the active branch in one snapshot. */
