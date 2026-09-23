@@ -16,12 +16,14 @@ import { findTaskByRunIdForStatus } from "../../../tasks/task-status-access.js";
 import {
   createSessionEntry,
   createSubagentRunRecord,
+  mockGatewayMethods,
   type SubagentRegistryHarness,
 } from "../../subagent-test-fixtures.test-helpers.js";
 import { SUBAGENT_ENDED_REASON_COMPLETE } from "./subagent-lifecycle-events.js";
 import { observeRootWork } from "./subagent-registry.browser-cleanup.test-support.js";
 import type { createSubagentRegistryMockState } from "./subagent-registry.mock-state.test-support.js";
 import { makeRunningTaskParams } from "./subagent-registry.run-fixtures.test-support.js";
+import type { SubagentRunRecord } from "./subagent-registry.types.js";
 
 export function registerRestoredTaskSettlementTest({
   getRegistry,
@@ -165,4 +167,95 @@ export function registerRestoredTaskSettlementTest({
       resetTaskFlowRegistryForTests({ persist: false });
     }
   });
+}
+
+export function registerRestoredSessionCompletionTest({
+  mocks,
+  hydrateAndActivateRegistry,
+  findRequesterRun,
+}: {
+  mocks: Pick<
+    ReturnType<typeof createSubagentRegistryMockState>,
+    | "entries"
+    | "restoreSubagentRunsFromDisk"
+    | "callGateway"
+    | "captureSubagentCompletionReply"
+    | "runSubagentAnnounceFlow"
+    | "dispatchRecoveryAgent"
+  >;
+  hydrateAndActivateRegistry: () => void;
+  findRequesterRun: (runId: string) => SubagentRunRecord | undefined;
+}): void {
+  it.each(["done"] as const)(
+    "settles and announces a retired running row whose saved session completed as %s",
+    async (status) => {
+      resetTaskRegistryForTests({ persist: false });
+      resetTaskFlowRegistryForTests({ persist: false });
+      const completionStarted = createDeferred();
+      const settleRootWork = observeRootWork();
+      try {
+        const startedAt = Date.now() - 2_000;
+        const endedAt = Date.now() - 1_000;
+        const runId = "run-restored-completed-session";
+        const childSessionKey = "agent:main:subagent:restored-completed-session";
+        mocks.entries = {
+          [childSessionKey]: createSessionEntry({
+            status,
+            startedAt,
+            endedAt,
+            updatedAt: endedAt,
+            lifecycleRevision: "revision-child",
+            lifecycleRunId: runId,
+            abortedLastRun: false,
+          }),
+        };
+        expect(
+          createRunningTaskRun(
+            makeRunningTaskParams({ runId, childSessionKey, startedAt, task: "saved completion" }),
+          ),
+        ).not.toBeNull();
+        const restored = createSubagentRunRecord({
+          runId,
+          childSessionKey,
+          task: "saved completion",
+          createdAt: startedAt,
+          execution: { status: "running", startedAt, lifecycleGeneration: "retired-generation" },
+        });
+        mocks.restoreSubagentRunsFromDisk.mockImplementation(((params: {
+          runs: Map<string, SubagentRunRecord>;
+        }) => {
+          params.runs.set(runId, restored);
+          return 1;
+        }) as never);
+        mockGatewayMethods(mocks.callGateway, { "agent.wait": { status: "timeout" } });
+        mocks.captureSubagentCompletionReply.mockImplementationOnce(async () => {
+          completionStarted.resolve();
+          return "final completion reply";
+        });
+
+        hydrateAndActivateRegistry();
+
+        // The completion root is admitted after agent.wait resolves.
+        await completionStarted.promise;
+        await settleRootWork(true);
+        expect(findRequesterRun(runId)).toMatchObject({
+          execution: { status: "terminal", endedAt, outcome: { status: "ok" } },
+          endedReason: SUBAGENT_ENDED_REASON_COMPLETE,
+          delivery: { status: "delivered" },
+        });
+        expect(findTaskByRunIdForStatus(runId)).toMatchObject({ status: "succeeded", endedAt });
+        expect(mocks.runSubagentAnnounceFlow).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            childRunId: runId,
+            outcome: expect.objectContaining({ status: "ok" }),
+          }),
+        );
+        expect(mocks.dispatchRecoveryAgent).not.toHaveBeenCalled();
+      } finally {
+        await settleRootWork();
+        resetTaskRegistryForTests({ persist: false });
+        resetTaskFlowRegistryForTests({ persist: false });
+      }
+    },
+  );
 }
