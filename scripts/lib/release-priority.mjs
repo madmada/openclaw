@@ -1,16 +1,16 @@
 // Release priority: while a Full Release Validation parent runs, hosted-runner
 // PR-side workflows defer through a job-level `if` on the repo variable below,
 // and `pnpm frv prioritize` cancels queued non-release runs, then restores them.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 export const RELEASE_PRIORITY_VARIABLE = "OPENCLAW_RELEASE_PRIORITY_RUN";
 export const RELEASE_PRIORITY_RECORD_KIND = "openclaw.frv-release-priority";
 const CI_GATE_JOB = "openclaw/ci-gate";
 // Hosted-runner workflows whose root jobs carry the variable gate.
+// Security Review stays live: it owns approval revocation for openclaw/ci-gate.
 export const RELEASE_PRIORITY_WORKFLOWS = Object.freeze([
   "CI",
-  "Security Review",
   "Auto response",
   "PR context and evidence",
   "Labeler",
@@ -67,13 +67,50 @@ export function selectDeferredRunCandidates(runs, record) {
   );
 }
 
+// A deferred CI run skips preflight and every lane behind it; the gate fails
+// naming the release and security-fast (`!cancelled()`) still executes.
 export function isDeferredCiJobSet(jobs) {
   return (
-    jobs.length > 0 &&
-    jobs.every((job) =>
-      job.name === CI_GATE_JOB ? job.conclusion === "failure" : job.conclusion === "skipped",
+    jobs.some((job) => job.name === "preflight" && job.conclusion === "skipped") &&
+    jobs.some((job) => job.name === CI_GATE_JOB && job.conclusion === "failure") &&
+    jobs.every(
+      (job) =>
+        job.name === CI_GATE_JOB || job.name === "security-fast" || job.conclusion === "skipped",
     )
   );
+}
+
+// A PR's CI groups by PR number with cancel-in-progress, so only the newest
+// run per workflow and branch may be re-queued.
+export function selectLatestRunsPerLane(runs) {
+  const latest = new Map();
+  for (const run of runs) {
+    const key = `${run.name}\n${run.headBranch}`;
+    if (!latest.has(key) || Number(latest.get(key).id) < Number(run.id)) {
+      latest.set(key, run);
+    }
+  }
+  return [...latest.values()];
+}
+
+// Repeated prioritization keeps the original pause window and every
+// cancellation it already recorded.
+export function mergeReleasePriorityRecord(previous, next) {
+  if (!previous) {
+    return next;
+  }
+  if (previous.parentRunId !== next.parentRunId) {
+    throw new Error(`release priority record belongs to parent ${previous.parentRunId}`);
+  }
+  const known = new Set(previous.cancelled.map((run) => run.id));
+  return {
+    ...previous,
+    cancelled: [...previous.cancelled, ...next.cancelled.filter((run) => !known.has(run.id))],
+  };
+}
+
+export function isQueuedRun(run) {
+  return QUEUED_STATUSES.has(run?.status);
 }
 
 export function defaultReleasePriorityRecordPath(parentRunId) {
@@ -85,7 +122,10 @@ export function writeReleasePriorityRecord(path, record) {
   writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`);
 }
 
-export function readReleasePriorityRecord(path) {
+export function readReleasePriorityRecord(path, options = {}) {
+  if (options.optional && !existsSync(path)) {
+    return null;
+  }
   const record = JSON.parse(readFileSync(path, "utf8"));
   if (
     record?.kind !== RELEASE_PRIORITY_RECORD_KIND ||

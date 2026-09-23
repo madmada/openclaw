@@ -20,17 +20,35 @@ export interface FrvContinuationStatus {
   passed: FrvChildStatus[];
 }
 
+interface FrvReadOptions {
+  operationDeadline?: number;
+}
+
 export interface FrvClient {
   repository?: string;
   getReleaseEvidenceClient: () => ReturnType<
     typeof import("./release-ci-summary.mjs").createReleaseEvidenceClient
   >;
-  getAttemptJobs: (runId: string, runAttempt: number) => Promise<Record<string, unknown>[]>;
-  getJobLog: (jobId: number) => Promise<string>;
-  getParentJobs: (runId: string) => Promise<Record<string, unknown>[]>;
-  getRun: (runId: string) => Promise<Record<string, unknown>>;
-  getRunAttempt: (runId: string, runAttempt: number) => Promise<Record<string, unknown>>;
+  getAttemptJobs: (
+    runId: string,
+    runAttempt: number,
+    options?: FrvReadOptions,
+  ) => Promise<Record<string, unknown>[]>;
+  getJobLog: (jobId: number, options?: FrvReadOptions) => Promise<string>;
+  getParentJobs: (runId: string, options?: FrvReadOptions) => Promise<Record<string, unknown>[]>;
+  getRun: (runId: string, options?: FrvReadOptions) => Promise<Record<string, unknown>>;
+  getRunAttempt: (
+    runId: string,
+    runAttempt: number,
+    options?: FrvReadOptions,
+  ) => Promise<Record<string, unknown>>;
+  getManualRetryAuthority?: (
+    plan: Record<string, unknown>,
+    childKey: string,
+    operationDeadline: number,
+  ) => Promise<{ outcome: "not-attempted" | "rejected" }>;
   rerunFailed?: (runId: string) => Promise<unknown>;
+  rerunJob?: (jobId: number) => Promise<unknown>;
   rerunParent?: (runId: string) => Promise<unknown>;
   cancelRun?: (runId: string) => Promise<unknown>;
   rerunRun?: (runId: string) => Promise<unknown>;
@@ -53,7 +71,17 @@ export interface FrvClient {
 }
 
 export type FrvConcreteClient = FrvClient &
-  Required<Pick<FrvClient, "rerunFailed" | "rerunParent" | "verify" | "verifySeal">>;
+  Required<
+    Pick<
+      FrvClient,
+      | "getManualRetryAuthority"
+      | "rerunFailed"
+      | "rerunJob"
+      | "rerunParent"
+      | "verify"
+      | "verifySeal"
+    >
+  >;
 
 export function prioritizeRelease(
   parentRunId: string,
@@ -69,15 +97,10 @@ export function clearReleasePriority(
   client: Partial<FrvClient>,
   parentRunId: string,
 ): Promise<boolean>;
-export function rerunFailedChildren(
-  plan: Record<string, unknown>,
-  rootRunId: string,
-  client: FrvClient,
-  options?: { child?: string; dryRun?: boolean; operationDeadline?: number },
-): Promise<Record<string, unknown>>;
 export function inspectContinuation(
   plan: Record<string, unknown>,
   client: Pick<FrvClient, "getAttemptJobs" | "getRun" | "repository">,
+  options?: FrvReadOptions,
 ): Promise<FrvContinuationStatus>;
 export function createClient(
   repository: string,
@@ -91,6 +114,7 @@ export function preflightContinuation(
     "getJobLog" | "getParentJobs" | "getRunAttempt" | "getReleaseEvidenceClient" | "getRun"
   >,
   repository?: string,
+  options?: FrvReadOptions,
 ): Promise<Record<string, unknown>>;
 export function loadPlan(
   options: Record<string, unknown>,
@@ -104,5 +128,6 @@ export function continueFailed(
 ): Promise<{
   action: string;
   finalRunId?: string;
+  reruns?: Record<string, unknown>[];
   status: FrvContinuationStatus;
 }>;

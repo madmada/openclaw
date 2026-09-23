@@ -29,3 +29,13 @@ export function isDeferredCiJobSet(jobs: Record<string, unknown>[]): boolean;
 export function defaultReleasePriorityRecordPath(parentRunId: string | number): string;
 export function writeReleasePriorityRecord(path: string, record: ReleasePriorityRecord): void;
 export function readReleasePriorityRecord(path: string): ReleasePriorityRecord;
+export function readReleasePriorityRecord(
+  path: string,
+  options: { optional: true },
+): ReleasePriorityRecord | null;
+export function selectLatestRunsPerLane(runs: ReleasePriorityRun[]): ReleasePriorityRun[];
+export function mergeReleasePriorityRecord(
+  previous: ReleasePriorityRecord | null,
+  next: ReleasePriorityRecord,
+): ReleasePriorityRecord;
+export function isQueuedRun(run: Record<string, unknown> | undefined): boolean;

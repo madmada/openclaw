@@ -10,6 +10,7 @@ import {
   isDeferredCiJobSet,
   isReleaseBranch,
   selectDeferredRunCandidates,
+  selectLatestRunsPerLane,
   selectQueuedRunsToCancel,
 } from "../../scripts/lib/release-priority.mjs";
 
@@ -56,7 +57,13 @@ function client(
       variable = "";
     },
     getParentJobs: async (id: string) => options.jobs?.[id] ?? [],
-    getRun: async () => PARENT,
+    getRun: async (id: string) =>
+      id === "77"
+        ? PARENT
+        : ((options.queued ?? []).find((run) => String(run.id) === id) ?? {
+            id,
+            status: "completed",
+          }),
     getVariable: async () => variable,
     listRuns: async (query: string) => {
       calls.push(`list:${query}`);
@@ -111,9 +118,23 @@ describe("release priority selection", () => {
     );
     expect(candidates.map((entry) => entry.id)).toEqual([1, 2]);
     const gate = { name: "openclaw/ci-gate", conclusion: "failure" };
-    expect(isDeferredCiJobSet([{ name: "preflight", conclusion: "skipped" }, gate])).toBe(true);
+    const preflight = { name: "preflight", conclusion: "skipped" };
+    expect(isDeferredCiJobSet([preflight, gate])).toBe(true);
+    expect(
+      isDeferredCiJobSet([preflight, gate, { name: "security-fast", conclusion: "success" }]),
+    ).toBe(true);
+    expect(
+      isDeferredCiJobSet([preflight, gate, { name: "macos-node", conclusion: "failure" }]),
+    ).toBe(false);
     expect(isDeferredCiJobSet([{ name: "preflight", conclusion: "success" }, gate])).toBe(false);
     expect(isDeferredCiJobSet([])).toBe(false);
+    expect(
+      selectLatestRunsPerLane([
+        { id: "1", name: "CI", headBranch: "a", event: "pull_request", url: "" },
+        { id: "9", name: "CI", headBranch: "a", event: "pull_request", url: "" },
+        { id: "2", name: "CI", headBranch: "b", event: "pull_request", url: "" },
+      ]).map((run) => run.id),
+    ).toEqual(["9", "2"]);
   });
 
   it("gates every root job of the listed hosted-runner workflows", () => {
@@ -151,21 +172,45 @@ describe("release priority selection", () => {
 });
 
 describe("pnpm frv prioritize", () => {
-  it("sets the variable, cancels deferrable queued runs, and records them", async () => {
-    const fake = client({ queued: [run(1, "CI"), run(2, "CI", { event: "workflow_dispatch" })] });
+  it("records intent, sets the variable, cancels still-queued runs, and restores newest-per-lane", async () => {
+    const fake = client({
+      queued: [
+        run(1, "CI"),
+        run(2, "CI", { event: "workflow_dispatch" }),
+        run(6, "Labeler", { event: "pull_request_target", head_branch: "other" }),
+      ],
+    });
+    fake.getRun = async (id: string) =>
+      id === "77"
+        ? PARENT
+        : id === "6"
+          ? run(6, "Labeler", { status: "in_progress" })
+          : run(Number(id), "CI");
     const outPath = join(mkdtempSync(join(tmpdir(), "frv-priority-")), "record.json");
     await expect(prioritizeRelease("77", fake, { dryRun: true })).resolves.toMatchObject({
       action: "would-prioritize",
     });
     expect(fake.calls.filter((call) => !call.startsWith("list:"))).toEqual([]);
     const result = await prioritizeRelease("77", fake, { outPath });
-    expect(result).toMatchObject({ action: "prioritized", failures: [], recordPath: outPath });
+    expect(result).toMatchObject({
+      action: "prioritized",
+      failures: [],
+      recordPath: outPath,
+      skipped: [{ id: "6" }],
+    });
     expect(fake.calls.filter((call) => !call.startsWith("list:"))).toEqual([
       `set:${RELEASE_PRIORITY_VARIABLE}=77`,
       "cancel:1",
     ]);
     const record = JSON.parse(readFileSync(outPath, "utf8"));
     expect(record).toMatchObject({ parentRunId: "77", cancelled: [{ id: "1", name: "CI" }] });
+    // A repeated call keeps the original window and cancellations.
+    const again = client({ queued: [run(8, "CI", { head_branch: "later" })] });
+    again.getRun = async (id: string) => (id === "77" ? PARENT : run(Number(id), "CI"));
+    await prioritizeRelease("77", again, { outPath });
+    const merged = JSON.parse(readFileSync(outPath, "utf8"));
+    expect(merged.recordedAt).toBe(record.recordedAt);
+    expect(merged.cancelled.map((entry: { id: string }) => entry.id)).toEqual(["1", "8"]);
 
     const after = { created_at: "2999-01-01T00:00:00Z", status: "completed" };
     const restoreClient = client({
@@ -175,28 +220,35 @@ describe("pnpm frv prioritize", () => {
         run(3, "CI", { ...after, conclusion: "failure" }),
         run(4, "CI", { ...after, conclusion: "failure" }),
         run(5, "Labeler", { ...after, conclusion: "skipped", event: "pull_request_target" }),
+        run(9, "CI", { ...after, conclusion: "failure", head_branch: "later" }),
       ],
       jobs: {
         "3": [
           { name: "preflight", conclusion: "skipped" },
+          { name: "security-fast", conclusion: "success" },
           { name: "openclaw/ci-gate", conclusion: "failure" },
         ],
         "4": [
           { name: "preflight", conclusion: "success" },
           { name: "openclaw/ci-gate", conclusion: "failure" },
         ],
+        "9": [
+          { name: "preflight", conclusion: "skipped" },
+          { name: "openclaw/ci-gate", conclusion: "failure" },
+        ],
       },
     });
+    // Run 3 supersedes recorded run 1 (same workflow and branch); 9 supersedes recorded 8.
     await expect(restoreReleasePriority(outPath, restoreClient)).resolves.toMatchObject({
       action: "restored",
       cleared: true,
       failures: [],
-      rerun: [{ id: "1" }, { id: "3" }, { id: "5" }],
+      rerun: [{ id: "3" }, { id: "9" }, { id: "5" }],
     });
     expect(restoreClient.calls.filter((call) => !call.startsWith("list:"))).toEqual([
       `delete:${RELEASE_PRIORITY_VARIABLE}`,
-      "rerun:1",
       "rerun:3",
+      "rerun:9",
       "rerun:5",
     ]);
   });
