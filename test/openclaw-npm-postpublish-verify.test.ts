@@ -1204,6 +1204,23 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
       },
     },
   };
+  const legacyCompanionSource = [
+    'import { createRequire } from "node:module";',
+    "//#region extensions/discord/src/voice/sdk-runtime.ts",
+    'const voice = createRequire(import.meta.url)("@discordjs/voice");',
+    "//#endregion",
+    "export { voice };",
+    "",
+  ].join("\n");
+  const writeTrustedDiscordManifest = (installRoot: string) => {
+    const manifestRoot = join(installRoot, "trusted-extensions");
+    writePackageFile(manifestRoot, "discord/package.json", {
+      name: "@openclaw/discord",
+      version: "2026.7.33",
+      dependencies: { "@discordjs/voice": "0.19.2" },
+    });
+    return manifestRoot;
+  };
 
   it.each(["2026.7.33", "2026.9.8"])(
     "accepts byte-matched companion ownership for %s",
@@ -1229,17 +1246,132 @@ describe("collectInstalledRootDependencyManifestErrors", () => {
       ownership: companionOwnership,
       source: companionSource,
     });
-    const trustedManifestRoot = join(installRoot, "trusted-extensions");
-    writePackageFile(trustedManifestRoot, "discord/package.json", {
-      name: "@openclaw/discord",
-      version: "2026.7.33",
-      dependencies: { "@discordjs/voice": "0.19.2" },
-    });
+    const trustedManifestRoot = writeTrustedDiscordManifest(installRoot);
 
     try {
       expect(
-        collectInstalledRootDependencyManifestErrors(packageRoot, [trustedManifestRoot]),
+        collectInstalledRootDependencyManifestErrors(packageRoot, [trustedManifestRoot], true),
       ).toStrictEqual([]);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts legacy generated ownership only with a trusted companion manifest root", () => {
+    const { installRoot, packageRoot } = makeCompanionImportFixture({
+      companions: [],
+      source: legacyCompanionSource,
+    });
+    const trustedManifestRoot = writeTrustedDiscordManifest(installRoot);
+
+    try {
+      expect(collectInstalledRootDependencyManifestErrors(packageRoot)).toEqual([
+        "installed package root is missing declared runtime dependency '@discordjs/voice' for dist importers: companion-runtime.js. Add it to package.json dependencies/optionalDependencies.",
+      ]);
+      expect(
+        collectInstalledRootDependencyManifestErrors(packageRoot, [trustedManifestRoot], true),
+      ).toStrictEqual([]);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("does not let legacy generated ownership cover a root-owned import", () => {
+    const source = [
+      'import { createRequire } from "node:module";',
+      "//#region extensions/discord/src/voice/sdk-runtime.ts",
+      'const voice = createRequire(import.meta.url)("@discordjs/voice");',
+      "//#endregion",
+      'const rootVoice = createRequire(import.meta.url)("@discordjs/voice");',
+      "export { rootVoice, voice };",
+      "",
+    ].join("\n");
+    const { installRoot, packageRoot } = makeCompanionImportFixture({
+      companions: [],
+      source,
+    });
+    const trustedManifestRoot = writeTrustedDiscordManifest(installRoot);
+
+    try {
+      expect(
+        collectInstalledRootDependencyManifestErrors(packageRoot, [trustedManifestRoot], true),
+      ).toEqual([
+        "installed package root is missing declared runtime dependency '@discordjs/voice' for dist importers: companion-runtime.js. Add it to package.json dependencies/optionalDependencies.",
+      ]);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a region-owned relative-only legacy chunk out of root traversal", () => {
+    const { installRoot, packageRoot } = makeCompanionImportFixture({
+      companions: [],
+      source: legacyCompanionSource,
+    });
+    const trustedManifestRoot = writeTrustedDiscordManifest(installRoot);
+    writeFileSync(
+      join(packageRoot, "dist", "plugin-entry.js"),
+      [
+        "//#region extensions/discord/src/voice/plugin-entry.ts",
+        'require("./companion-runtime.js");',
+        "//#endregion",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    try {
+      expect(
+        collectInstalledRootDependencyManifestErrors(packageRoot, [trustedManifestRoot], true),
+      ).toStrictEqual([]);
+    } finally {
+      rmSync(installRoot, { recursive: true, force: true });
+    }
+  });
+
+  it.each<{ name: string; files: Array<[string, string]> }>([
+    {
+      name: "a direct root require",
+      files: [["root-runtime.cjs", 'require("./companion-runtime.js");\n']],
+    },
+    {
+      name: "a transitive root require",
+      files: [
+        ["root-runtime.cjs", 'require("./bridge.js");\n'],
+        ["bridge.js", 'require("./companion-runtime.js");\n'],
+      ],
+    },
+    {
+      name: "an unowned edge in a mixed-ownership chunk",
+      files: [
+        [
+          "mixed-runtime.js",
+          [
+            "//#region extensions/discord/src/voice/sdk-runtime.ts",
+            'require("@discordjs/voice");',
+            "//#endregion",
+            'require("./companion-runtime.js");',
+            "",
+          ].join("\n"),
+        ],
+      ],
+    },
+  ])("does not let legacy generated ownership cover $name", ({ files }) => {
+    const { installRoot, packageRoot } = makeCompanionImportFixture({
+      companions: [],
+      source: legacyCompanionSource,
+    });
+    const trustedManifestRoot = writeTrustedDiscordManifest(installRoot);
+
+    try {
+      for (const [fileName, fileSource] of files) {
+        writeFileSync(join(packageRoot, "dist", fileName), fileSource, "utf8");
+      }
+      expect(
+        collectInstalledRootDependencyManifestErrors(packageRoot, [trustedManifestRoot], true),
+      ).toEqual([
+        "installed package root is missing declared runtime dependency '@discordjs/voice' for dist importers: companion-runtime.js. Add it to package.json dependencies/optionalDependencies.",
+      ]);
     } finally {
       rmSync(installRoot, { recursive: true, force: true });
     }

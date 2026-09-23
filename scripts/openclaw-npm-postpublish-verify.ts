@@ -114,6 +114,7 @@ const OPTIONAL_OR_EXTERNALIZED_RUNTIME_IMPORTS = new Set([
 ]);
 const require = createRequire(import.meta.url);
 const acorn = require("acorn") as typeof import("acorn");
+type AcornComment = import("acorn").Comment;
 
 type DistJavaScriptFileListResult =
   | { files: string[]; limitExceeded: false }
@@ -424,6 +425,7 @@ export async function verifyNpmProvenanceAttestation(params: {
 
 export function collectInstalledPackageErrors(params: {
   additionalCompanionManifestRoots?: string[];
+  allowLegacyGeneratedOwnership?: boolean;
   expectedVersion: string;
   installedVersion: string;
   packageRoot: string;
@@ -451,6 +453,7 @@ export function collectInstalledPackageErrors(params: {
     ...collectInstalledRootDependencyManifestErrors(
       params.packageRoot,
       params.additionalCompanionManifestRoots,
+      params.allowLegacyGeneratedOwnership,
     ),
   );
 
@@ -641,6 +644,11 @@ type ParsedImportSpecifiersResult =
     }
   | { ok: false; error: string };
 
+type PackageRootImportOccurrence = {
+  specifier: string;
+  start: number;
+};
+
 function extractJavaScriptImportSpecifiers(source: string): ParsedImportSpecifiersResult {
   try {
     // Keep strict JavaScript validation: TypeScript accepts some invalid JS bindings/contexts.
@@ -658,6 +666,7 @@ function extractJavaScriptImportSpecifiers(source: string): ParsedImportSpecifie
 export function collectInstalledRootDependencyManifestErrors(
   packageRoot: string,
   additionalCompanionManifestRoots: string[] = [],
+  allowLegacyGeneratedOwnership = false,
 ): string[] {
   const packageJsonPath = join(packageRoot, "package.json");
   if (!existsSync(packageJsonPath)) {
@@ -701,6 +710,8 @@ export function collectInstalledRootDependencyManifestErrors(
   }
   const importsByFile = new Map<string, string[]>();
   const extensionsByFile = new Map<string, string[]>();
+  const legacyExtensionsByFile = new Map<string, Map<string, Set<string>>>();
+  const legacyRootRelativeImportsByFile = new Map<string, string[]>();
 
   for (const filePath of distFiles.files) {
     const file = readInstalledRootDistJavaScriptFile(packageRoot, filePath);
@@ -722,14 +733,43 @@ export function collectInstalledRootDependencyManifestErrors(
         ];
       }
       extensionsByFile.set(file.relativePath, owners.extensions);
+    } else if (runtimeDependencyOwnership === null && allowLegacyGeneratedOwnership) {
+      const legacyOwnership = collectLegacyGeneratedOwnership(file.source);
+      if (legacyOwnership.hasExtensionOwnedImports) {
+        legacyExtensionsByFile.set(file.relativePath, legacyOwnership.extensionsByDependency);
+      }
+      if (legacyOwnership.rootRelativeImports.length > 0) {
+        legacyRootRelativeImportsByFile.set(file.relativePath, legacyOwnership.rootRelativeImports);
+      }
     }
   }
 
   // Root imports from any build output override plugin evidence, including
   // relative createRequire calls that are absent from the bundler's graph.
-  const pending = [...importsByFile.keys()].filter((file) => !extensionsByFile.has(file));
+  const pending = [...importsByFile.keys()].filter(
+    (file) => !extensionsByFile.has(file) && !legacyExtensionsByFile.has(file),
+  );
   const visited = new Set<string>();
   const distDir = importsByFile.size ? realpathSync(join(packageRoot, "dist")) : "";
+  const enqueueRelativeImport = (file: string, specifier: string) => {
+    try {
+      const resolveImport = createRequire(pathToFileURL(join(distDir, file))).resolve;
+      const importedPath = resolveImport(specifier.replace(/[?#].*$/u, ""));
+      const importedFile = relative(distDir, importedPath).replaceAll("\\", "/");
+      if (importsByFile.has(importedFile)) {
+        pending.push(importedFile);
+      }
+    } catch {
+      // Missing relative modules are reported by package closure checks.
+    }
+  };
+  // Legacy region ownership is occurrence-based. An unowned relative edge in an
+  // otherwise plugin-owned chunk still makes its target root-reachable.
+  for (const [file, imports] of legacyRootRelativeImportsByFile) {
+    for (const specifier of imports) {
+      enqueueRelativeImport(file, specifier);
+    }
+  }
   while (pending.length > 0) {
     const file = pending.pop()!;
     if (visited.has(file)) {
@@ -737,18 +777,10 @@ export function collectInstalledRootDependencyManifestErrors(
     }
     visited.add(file);
     extensionsByFile.delete(file);
-    const resolveImport = createRequire(pathToFileURL(join(distDir, file))).resolve;
+    legacyExtensionsByFile.delete(file);
     for (const specifier of importsByFile.get(file) ?? []) {
       if (specifier.startsWith(".")) {
-        try {
-          const importedPath = resolveImport(specifier.replace(/[?#].*$/u, ""));
-          const importedFile = relative(distDir, importedPath).replaceAll("\\", "/");
-          if (importsByFile.has(importedFile)) {
-            pending.push(importedFile);
-          }
-        } catch {
-          // Missing relative modules are reported by package closure checks.
-        }
+        enqueueRelativeImport(file, specifier);
       }
     }
   }
@@ -757,13 +789,16 @@ export function collectInstalledRootDependencyManifestErrors(
     const extensions = extensionsByFile.get(file);
     for (const specifier of imports) {
       const dependencyName = packageNameFromSpecifier(specifier);
+      const dependencyExtensions = dependencyName
+        ? legacyExtensionsByFile.get(file)?.get(dependencyName)
+        : undefined;
       if (
         !dependencyName ||
         NODE_BUILTIN_MODULES.has(dependencyName) ||
         OPTIONAL_OR_EXTERNALIZED_RUNTIME_IMPORTS.has(dependencyName) ||
         declaredRuntimeDeps.has(dependencyName) ||
-        (extensions?.length &&
-          extensions.every(
+        ((extensions?.length || dependencyExtensions?.size) &&
+          [...(extensions ?? dependencyExtensions ?? [])].every(
             (extensionId) =>
               bundledExtensionRuntimeDependencyOwners.get(dependencyName)?.has(extensionId) ||
               isInstalledCompanionExtensionOwnedRuntimeImport({
@@ -788,6 +823,109 @@ export function collectInstalledRootDependencyManifestErrors(
       return `installed package root is missing declared runtime dependency '${dependencyName}' for dist importers: ${importerList.join(", ")}. Add it to package.json dependencies/optionalDependencies.`;
     })
     .toSorted((left, right) => left.localeCompare(right));
+}
+
+type LegacyGeneratedOwnership = {
+  extensionsByDependency: Map<string, Set<string>>;
+  hasExtensionOwnedImports: boolean;
+  rootRelativeImports: string[];
+};
+
+function collectLegacyGeneratedOwnership(source: string): LegacyGeneratedOwnership {
+  const comments: AcornComment[] = [];
+  acorn.parse(source, {
+    allowHashBang: true,
+    ecmaVersion: "latest",
+    onComment: comments,
+    sourceType: "module",
+  });
+  const imports: PackageRootImportOccurrence[] = [];
+  collectPackageRootImports(source, (specifier, start) => {
+    imports.push({ specifier, start });
+  });
+  const ownersByPosition = collectGeneratedExtensionImportOwners(source, imports, comments);
+  const ownersByDependency = new Map<string, Set<string>>();
+  const unownedDependencies = new Set<string>();
+  const rootRelativeImports: string[] = [];
+  let hasExtensionOwnedImports = false;
+  for (const runtimeImport of imports) {
+    const extensionId = ownersByPosition.get(runtimeImport.start);
+    hasExtensionOwnedImports ||= extensionId !== undefined;
+    if (!extensionId && runtimeImport.specifier.startsWith(".")) {
+      rootRelativeImports.push(runtimeImport.specifier);
+    }
+    const dependencyName = packageNameFromSpecifier(runtimeImport.specifier);
+    if (!dependencyName) {
+      continue;
+    }
+    if (!extensionId) {
+      unownedDependencies.add(dependencyName);
+      continue;
+    }
+    const owners = ownersByDependency.get(dependencyName) ?? new Set<string>();
+    owners.add(extensionId);
+    ownersByDependency.set(dependencyName, owners);
+  }
+  for (const dependencyName of unownedDependencies) {
+    ownersByDependency.delete(dependencyName);
+  }
+  return {
+    extensionsByDependency: ownersByDependency,
+    hasExtensionOwnedImports,
+    rootRelativeImports,
+  };
+}
+
+function collectGeneratedExtensionImportOwners(
+  source: string,
+  imports: PackageRootImportOccurrence[],
+  comments: AcornComment[],
+): Map<number, string | undefined> {
+  const owners = new Map<number, string | undefined>();
+  const markers = comments.flatMap((comment) => {
+    if (
+      comment.type !== "Line" ||
+      source.slice(source.lastIndexOf("\n", comment.start - 1) + 1, comment.start).trim() !== ""
+    ) {
+      return [];
+    }
+    const match = comment.value.match(/^#(region|endregion)(?:[\t ]+([^\r\n]*?))?[\t ]*$/u);
+    return match
+      ? [
+          {
+            kind: match[1],
+            owner: match[2]?.match(/^extensions\/([a-z0-9][a-z0-9-]*)\//u)?.[1],
+            start: comment.start,
+          },
+        ]
+      : [];
+  });
+  const stack: Array<string | undefined> = [];
+  let markerIndex = 0;
+  for (const runtimeImport of imports.toSorted((left, right) => left.start - right.start)) {
+    while (markerIndex < markers.length && markers[markerIndex]!.start < runtimeImport.start) {
+      const marker = markers[markerIndex++]!;
+      if (marker.kind === "region") {
+        stack.push(marker.owner);
+      } else if (stack.length > 0) {
+        stack.pop();
+      } else {
+        return owners;
+      }
+    }
+    owners.set(runtimeImport.start, stack.at(-1));
+  }
+  while (markerIndex < markers.length) {
+    const marker = markers[markerIndex++]!;
+    if (marker.kind === "region") {
+      stack.push(marker.owner);
+    } else if (stack.length > 0) {
+      stack.pop();
+    } else {
+      return new Map();
+    }
+  }
+  return stack.length === 0 ? owners : new Map();
 }
 
 function isInstalledCompanionExtensionOwnedRuntimeImport(params: {

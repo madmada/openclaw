@@ -16,6 +16,7 @@ import {
   collectInstalledRootDependencyManifestErrors,
 } from "../scripts/openclaw-npm-postpublish-verify.ts";
 import {
+  allowsLegacyGeneratedOwnershipForSourceRoot,
   collectAppcastSparkleVersionErrors,
   collectCriticalPluginSdkEntrypointSizeFindings,
   collectForbiddenPackContentPaths,
@@ -590,6 +591,24 @@ describe("collectForbiddenPackPaths", () => {
 });
 
 describe("packed install verification", () => {
+  it("disables legacy ownership when the historical metadata producer exists", () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), "release-check-ownership-producer-"));
+    try {
+      expect(allowsLegacyGeneratedOwnershipForSourceRoot(sourceRoot)).toBe(true);
+
+      const producerPath = join(
+        sourceRoot,
+        "scripts/lib/runtime-dependency-ownership-build-plugin.mts",
+      );
+      mkdirSync(dirname(producerPath), { recursive: true });
+      writeFileSync(producerPath, "export {};\n", "utf8");
+
+      expect(allowsLegacyGeneratedOwnershipForSourceRoot(sourceRoot)).toBe(false);
+    } finally {
+      rmSync(sourceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("runs postpublish package integrity checks against the packed install before publish", () => {
     const root = mkdtempSync(join(tmpdir(), "release-check-packed-install-"));
     try {
