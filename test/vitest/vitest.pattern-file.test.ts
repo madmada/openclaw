@@ -68,7 +68,7 @@ describe("native CLI selection", () => {
     "intersects CLI $candidate with its actual owner $include",
     ({ include, candidate, selected }) => {
       expect(narrowIncludePatternsForCli(include, ["node", "vitest", "run", candidate])).toEqual(
-        selected ? [candidate] : [],
+        selected ? [candidate.replaceAll("\\", "/")] : [],
       );
       expect(matchesVitestCliSelection(infraFile, include, ["run", candidate], "", {})).toBe(
         selected,
