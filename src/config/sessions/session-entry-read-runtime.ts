@@ -154,7 +154,12 @@ async function withSessionEntryReadOnlyWorkerSource<T>(
     }
     assertCallerCurrent();
     for (const candidate of candidates) {
-      assertSessionStoreReadCandidate(candidate.path, [candidate]);
+      if (
+        captureSessionStoreReadCandidate(candidate.path, candidate.scope).physicalPath !==
+        candidate.physicalPath
+      ) {
+        throw new Error("Session store alias changed during discovery; retry the read.");
+      }
     }
     for (const { owner } of continuations) {
       owner.assertCurrent();

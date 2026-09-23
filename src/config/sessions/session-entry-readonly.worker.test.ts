@@ -1,3 +1,4 @@
+import { symlinkSync, unlinkSync } from "node:fs";
 import { expect, it, vi } from "vitest";
 import { closeOpenClawAgentDatabaseByPathAsync } from "../../state/openclaw-agent-db-lifecycle.js";
 import {
@@ -287,3 +288,43 @@ it("returns unavailable registry facts as locator data without catching candidat
     );
   });
 });
+
+it.runIf(process.platform !== "win32").each([false, true])(
+  "retains a custom store alias through its data consumer (retargeted: %s)",
+  async (retarget) => {
+    await withOpenClawTestState({ label: "readonly-store-alias" }, async ({ env, path }) => {
+      const original = openOpenClawAgentDatabase({ agentId: "main", env });
+      const sessionKey = "agent:main:alias";
+      writeSessionEntry(original, sessionKey, { sessionId: "original", updatedAt: 1 });
+      const replacement = retarget
+        ? openOpenClawAgentDatabase({ agentId: "main", path: path("replacement.sqlite"), env })
+        : undefined;
+      const alias = path("custom.sqlite");
+      symlinkSync(original.path, alias);
+      let consumed = false;
+      const pending = withSessionEntryReadOnlyInWorker(
+        { agentId: "main", sessionKey, storePath: path("custom.json"), env },
+        () => {},
+        async (read) => {
+          if (!read.ok) {
+            throw read.error;
+          }
+          expect(read.value?.sessionId).toBe("original");
+          consumed = true;
+          await Promise.resolve();
+          if (replacement) {
+            unlinkSync(alias);
+            symlinkSync(replacement.path, alias);
+          }
+          return read.value;
+        },
+      );
+      if (retarget) {
+        await expect(pending).rejects.toThrow("Session store alias changed during discovery");
+      } else {
+        await expect(pending).resolves.toMatchObject({ sessionId: "original" });
+      }
+      expect(consumed).toBe(true);
+    });
+  },
+);
