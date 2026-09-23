@@ -12,7 +12,7 @@ const HISTORY_PAGE_COMPLETE_REASON = "buzz room history page loaded";
 // so a busy relay rate-limits a room in the middle of the burst. That close names its
 // own delay and leaves the connection up, so wait it out instead of failing the room.
 // Exhausting these attempts keeps the original error, and the bus still fails loudly.
-export const BUZZ_HISTORY_RATE_LIMIT_MAX_RETRIES = 3;
+const HISTORY_RATE_LIMIT_MAX_RETRIES = 3;
 
 async function waitForBuzzRelayRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) {
@@ -87,7 +87,7 @@ async function queryBuzzRoomHistoryPage(params: {
       const retryDelayMs = resolveBuzzRelayRetryDelayMs(error);
       if (
         retryDelayMs === undefined ||
-        attempt >= BUZZ_HISTORY_RATE_LIMIT_MAX_RETRIES ||
+        attempt >= HISTORY_RATE_LIMIT_MAX_RETRIES ||
         params.signal?.aborted
       ) {
         throw error;

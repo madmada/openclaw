@@ -16,7 +16,7 @@ const BUZZ_RELAY_RATE_LIMIT_DEFAULT_RETRY_MS = 2_000;
 const BUZZ_RELAY_RATE_LIMIT_MAX_RETRY_MS = 5_000;
 
 /** A relay CLOSED frame for one subscription. The connection itself stays up. */
-export class BuzzRelaySubscriptionClosedError extends Error {
+class BuzzRelaySubscriptionClosedError extends Error {
   readonly reason: string;
 
   constructor(message: string, reason: string) {

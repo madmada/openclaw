@@ -1,8 +1,8 @@
 import type { Filter, Relay } from "nostr-tools";
 import { describe, expect, it, vi } from "vitest";
 import {
-  BuzzRelaySubscriptionClosedError,
   openBuzzRelaySubscription,
+  queryBuzzRelaySnapshot,
   resolveBuzzRelayRetryDelayMs,
 } from "./relay-subscription.js";
 
@@ -70,11 +70,39 @@ describe("openBuzzRelaySubscription", () => {
 });
 
 describe("resolveBuzzRelayRetryDelayMs", () => {
-  const closed = (reason: string) =>
-    new BuzzRelaySubscriptionClosedError(
-      `Buzz room history query closed for room: ${reason}`,
-      reason,
+  // Drive the real path: the relay CLOSEs a snapshot subscription, and whatever error
+  // that produces is what classification has to work with.
+  async function closedByRelay(reason: string): Promise<unknown> {
+    const relay = {
+      idleSince: Date.now(),
+      ongoingOperations: 0,
+      openSubs: new Map(),
+      scheduleIdleClose: vi.fn(),
+      close: vi.fn(),
+      send: async () => {},
+      prepareSubscription: (
+        _filters: Filter[],
+        handlers: { onclose: (reason: string) => void },
+      ) => {
+        queueMicrotask(() => handlers.onclose(reason));
+        return { id: "sub:1", close: vi.fn(), closed: false };
+      },
+    } as unknown as Relay;
+    return await queryBuzzRelaySnapshot({
+      relay,
+      filters: [{ kinds: [9] }],
+      timeoutMessage: "Timed out loading Buzz room history for room",
+      abortMessage: "Buzz room history query aborted",
+      failureMessage: "Buzz room history query failed",
+      closeReason: "buzz room history page loaded",
+      closeMessage: (closeReason) => `Buzz room history query closed for room: ${closeReason}`,
+      onEvent: () => {},
+      result: () => null,
+    }).then(
+      () => undefined,
+      (error: unknown) => error,
     );
+  }
 
   it.each([
     ["rate-limited: quota exceeded; retry in 2s", 2_000],
@@ -83,8 +111,8 @@ describe("resolveBuzzRelayRetryDelayMs", () => {
     ["rate-limited: slow down", 2_000],
     ["rate-limited: retry in 1m", 5_000],
     ["rate-limited: retry in 0s", 2_000],
-  ])("treats %s as retryable after %ims", (reason, expected) => {
-    expect(resolveBuzzRelayRetryDelayMs(closed(reason))).toBe(expected);
+  ])("treats %s as retryable after %ims", async (reason, expected) => {
+    expect(resolveBuzzRelayRetryDelayMs(await closedByRelay(reason))).toBe(expected);
   });
 
   it.each([
@@ -93,8 +121,8 @@ describe("resolveBuzzRelayRetryDelayMs", () => {
     "blocked: not a member",
     "shutdown",
     "connection closed while rate-limited: quota exceeded",
-  ])("does not retry %s", (reason) => {
-    expect(resolveBuzzRelayRetryDelayMs(closed(reason))).toBeUndefined();
+  ])("does not retry %s", async (reason) => {
+    expect(resolveBuzzRelayRetryDelayMs(await closedByRelay(reason))).toBeUndefined();
   });
 
   it("does not retry an error that is not a relay subscription close", () => {
