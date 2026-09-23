@@ -106,9 +106,19 @@ describe("test runtime prerequisites", () => {
       ["extensions/telegram/src/sticker-cache.selection.test.ts"],
       "runtime",
     ],
+    [
+      "Telegram native sticker pipeline",
+      ["extensions/telegram/src/bot.create-telegram-bot.native-pipeline.test.ts"],
+      "runtime",
+    ],
     ["Telegram polling runtime", ["extensions/telegram/src/polling-session.test.ts"], "runtime"],
     ["Telegram config", ["test/vitest/vitest.extension-telegram.config.ts"], "runtime"],
     ["ordinary Telegram test", ["extensions/telegram/src/sequential-key.test.ts"], undefined],
+    [
+      "ordinary Telegram worker test",
+      ["extensions/telegram/src/message-dispatch-dedupe.test.ts"],
+      undefined,
+    ],
     ["all plugins", ["extensions"], "private-qa"],
     ["full local suite", [], "private-qa"],
     ["ACP CLI process", ["src/cli/acp-cli-exit.process.test.ts"], "runtime"],
@@ -3336,8 +3346,14 @@ describe("scripts/test-projects changed-target routing", () => {
     },
     {
       title: "routes fake-timer unit-fast tests to the serial fake-timer lane",
-      target: "src/acp/control-plane/manager.test.ts",
+      target: "src/acp/translator.stop-reason.test.ts",
       config: "test/vitest/vitest.unit-fast-fake-timers.config.ts",
+      includePattern: "src/acp/translator.stop-reason.test.ts",
+    },
+    {
+      title: "routes ACP session signal tests to the host broker lane",
+      target: "src/acp/control-plane/manager.test.ts",
+      config: "test/vitest/vitest.infra.config.ts",
       includePattern: "src/acp/control-plane/manager.test.ts",
     },
   ])("$title", ({ target, config, includePattern }) => {
