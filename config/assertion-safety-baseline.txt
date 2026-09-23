@@ -3513,7 +3513,6 @@ ui/src/components/config-form.node.shared.ts	3
 ui/src/components/config-form.node.ts	1
 ui/src/components/config-form.render.ts	1
 ui/src/components/config-form.search.ts	1
-ui/src/components/config-form.shared.ts	2
 ui/src/components/config-form.tiers.ts	1
 ui/src/components/confirm-dialog.ts	1
 ui/src/components/connect-command.ts	2

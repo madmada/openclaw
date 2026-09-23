@@ -1037,10 +1037,6 @@ export class ConfigPage extends OpenClawLightDomElement {
       onSave: () => void runtimeConfig.save(),
       onRawDiscard: () => void runtimeConfig.discardDraft(),
       onOpenFile: () => void runtimeConfig.openFile(),
-      version:
-        this.context.config.current.serverVersion ??
-        this.context.gateway.snapshot.hello?.server?.version ??
-        "",
       theme: this.settings.theme,
       themeOverridden: themePref.overridden,
       themeProvenance: themePref.provenance,
