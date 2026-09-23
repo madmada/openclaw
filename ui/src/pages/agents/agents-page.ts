@@ -114,10 +114,7 @@ class AgentsPage
   @state() toolsEffectiveError: string | null = null;
   @state() toolsEffectiveResult: ToolsEffectiveResult | null = null;
   get modelCatalog() {
-    return readAgentModelCatalog(
-      this.connected ? this.client : null,
-      this.resolveSelectedAgentId(),
-    );
+    return readAgentModelCatalog(this.connected ? this.client : null, this.agentsSelectedId);
   }
   @state() chatModelCatalogStatus = createPanelRefreshStatus();
   private chatModelCatalogPending: Promise<unknown> | null = null;
