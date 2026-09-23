@@ -51,12 +51,8 @@ const publications: Record<string, string | symbol> = {
   "src/agents/tool-search.ts": Symbol.for("openclaw.toolSearchTestApi"),
   "src/agents/tools/ask-user-tool.ts": Symbol.for("openclaw.askUserToolTestApi"),
   "src/agents/tools/image-tool.ts": Symbol.for("openclaw.imageToolTestApi"),
-  "src/agents/utils/tools-manager.ts": Symbol.for("openclaw.toolsManagerTestApi"),
   "src/agents/workspace-legacy-state.ts": Symbol.for("openclaw.workspaceLegacyStateTestApi"),
   "src/agents/worktrees/run-lease.ts": Symbol.for("openclaw.worktreeRunLeaseTestApi"),
-  "src/auto-reply/reply/agent-runner-session-reset.ts": Symbol.for(
-    "openclaw.agentRunnerSessionResetTestApi",
-  ),
   "src/auto-reply/reply/commands-login.ts": Symbol.for("openclaw.commandsLoginTestApi"),
   "src/auto-reply/reply/queue/enqueue.ts": Symbol.for("openclaw.queueEnqueueTestApi"),
   "src/auto-reply/reply/reply-run-registry.registry.ts": Symbol.for(
