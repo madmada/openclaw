@@ -49,7 +49,6 @@ import { assertValidParams } from "./validation.js";
 type ChatAbortLifecycle = {
   onAuthorizedAfterQueuedAbort?: () => boolean;
   onDescendantsCancelled?: () => void;
-  excludeRunIds?: ReadonlySet<string>;
   cascadeDescendants?: true;
 };
 
@@ -179,7 +178,6 @@ export async function handleChatAbortRequestWithLifecycle(
       requester,
       assertCurrent,
       preserveSideRuns,
-      excludeRunIds: lifecycle.excludeRunIds,
       onAuthorizedAfterQueuedAbort: lifecycle.onAuthorizedAfterQueuedAbort,
       cascadeDescendants: lifecycle.cascadeDescendants,
     });
