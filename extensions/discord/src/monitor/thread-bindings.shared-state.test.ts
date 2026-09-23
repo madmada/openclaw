@@ -14,14 +14,14 @@ async function loadThreadBindingsViaAlternateLoader(): Promise<ThreadBindingsMod
 }
 
 describe("thread binding manager state", () => {
-  beforeEach(() => {
-    resetThreadBindingsForTests();
+  beforeEach(async () => {
+    await resetThreadBindingsForTests();
   });
 
   it("shares managers between ESM and alternate-loaded module instances", async () => {
     const viaAlternateLoader = await loadThreadBindingsViaAlternateLoader();
 
-    createThreadBindingManager({
+    await createThreadBindingManager({
       cfg: EMPTY_DISCORD_TEST_CONFIG,
       accountId: "work",
       persist: false,
