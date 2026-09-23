@@ -60,7 +60,7 @@ function client(
     getRun: async (id: string) =>
       id === "77"
         ? PARENT
-        : ((options.queued ?? []).find((run) => String(run.id) === id) ?? {
+        : ((options.queued ?? []).find((entry) => String(entry.id) === id) ?? {
             id,
             status: "completed",
           }),
@@ -133,7 +133,7 @@ describe("release priority selection", () => {
         { id: "1", name: "CI", headBranch: "a", event: "pull_request", url: "" },
         { id: "9", name: "CI", headBranch: "a", event: "pull_request", url: "" },
         { id: "2", name: "CI", headBranch: "b", event: "pull_request", url: "" },
-      ]).map((run) => run.id),
+      ]).map((entry) => entry.id),
     ).toEqual(["9", "2"]);
   });
 
