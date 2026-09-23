@@ -247,7 +247,11 @@ export function assertWorkshopLegacyImported(stateDir, fixture, current) {
   assert.equal(event.proposed_version, "v1");
   assert.equal(event.occurred_at, record.appliedAt);
   assert.deepEqual(JSON.parse(event.actor_json), { type: "system" });
-  assert.deepEqual(JSON.parse(event.payload_json), { recovered: true });
+  assert.deepEqual(
+    JSON.parse(event.payload_json),
+    [1, { recovered: true }, null],
+    "Recovered Workshop event payload changed",
+  );
   assert.equal(
     event.revision_hash,
     sha256(

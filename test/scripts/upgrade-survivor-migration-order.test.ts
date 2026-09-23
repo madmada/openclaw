@@ -392,7 +392,7 @@ function simulateWorkshopLegacyImport(
       "v1",
       appliedAt,
       JSON.stringify({ type: "system" }),
-      JSON.stringify({ recovered: true }),
+      JSON.stringify([1, { recovered: true }, null]),
       revisionHash,
     );
   database.close();
@@ -494,6 +494,9 @@ describe("Workshop Doctor recovery evidence", () => {
     "retained-bytes-changed",
     "rollback-changed",
     "duplicate-event",
+    "event-envelope-version",
+    "event-recovery-payload",
+    "event-evaluation",
     "second-doctor-changed",
     "row-kind",
     "row-created_at",
@@ -547,6 +550,18 @@ describe("Workshop Doctor recovery evidence", () => {
           );
           database.close();
         }
+        if (outcome.startsWith("event-")) {
+          const stored = [
+            outcome === "event-envelope-version" ? 2 : 1,
+            { recovered: outcome !== "event-recovery-payload" },
+            outcome === "event-evaluation" ? {} : null,
+          ];
+          const database = new DatabaseSync(fixture.filename);
+          database
+            .prepare("UPDATE skill_workshop_proposal_events SET payload_json = ?")
+            .run(JSON.stringify(stored));
+          database.close();
+        }
         if (outcome.startsWith("row-")) {
           const database = new DatabaseSync(fixture.filename);
           database.exec(`UPDATE skill_workshop_proposals SET ${outcome.slice(4)} = 'changed'`);
@@ -587,11 +602,13 @@ describe("Workshop Doctor recovery evidence", () => {
             ? /Imported rollback payload changed/
             : outcome === "duplicate-event"
               ? /exactly one applied event/
-              : outcome.startsWith("row-")
-                ? /Authoritative Workshop proposal columns/
-                : ["missing-warning", "truncated-warning"].includes(outcome)
-                  ? /Missing complete recoverable Workshop manual-review warning/
-                  : /artifact bytes/,
+              : outcome.startsWith("event-")
+                ? /Recovered Workshop event payload changed/
+                : outcome.startsWith("row-")
+                  ? /Authoritative Workshop proposal columns/
+                  : ["missing-warning", "truncated-warning"].includes(outcome)
+                    ? /Missing complete recoverable Workshop manual-review warning/
+                    : /artifact bytes/,
       );
       return;
     }
