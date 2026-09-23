@@ -1,7 +1,6 @@
 import type { AgentMessage } from "@openclaw/agent-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { expect } from "vitest";
-import { readToolSearchCallArgs, readToolSearchId } from "../../agents/tool-search-request.js";
 import type { readSkillCuratorReviewStatus } from "./collection-review-state.test-support.js";
 import { readExperienceReviewMessageText } from "./experience-review-message-text.test-support.js";
 import type { observeExperienceReview } from "./experience-review-observation.test-support.js";
@@ -34,36 +33,41 @@ export function assertExperienceReviewDecision(params: {
   expect(observation.toolResults.some((result) => result.isError)).toBe(false);
   const workshopCalls: Array<{ action: unknown; receiptText: string }> = [];
   for (const call of observation.toolCalls) {
+    expect(["tool_search", "tool_describe", "tool_call"]).toContain(call.name);
     const receipts = observation.toolResults.filter(
       (result) => result.toolName === call.name && result.toolCallId === call.id,
     );
     expect(receipts).toHaveLength(1);
-    expect(receipts[0]!.isError).toBe(false);
-    const text = readExperienceReviewMessageText(receipts[0]!.content);
-    if (call.name === "tool_search") {
+    const receipt = receipts[0];
+    expect(receipt).toMatchObject({ isError: false });
+    if (call.name !== "tool_call") {
       continue;
     }
-    if (call.name === "tool_describe") {
-      expect(["skill_workshop", "openclaw:core:skill_workshop"]).toContain(
-        readToolSearchId(call.arguments),
-      );
-      continue;
+    if (!receipt || !isRecord(call.arguments) || !isRecord(call.arguments.args)) {
+      throw new Error("Workshop dispatch requires arguments and a matching receipt");
     }
-    expect(call.name).toBe("tool_call");
-    const target = readToolSearchCallArgs(call.arguments);
-    expect(["skill_workshop", "openclaw:core:skill_workshop"]).toContain(target.id);
-    const envelope: unknown = JSON.parse(text);
-    if (!isRecord(envelope) || !isRecord(envelope.result)) {
-      throw new Error("Expected a structured Workshop call receipt");
+    const envelope: unknown = JSON.parse(readExperienceReviewMessageText(receipt.content));
+    if (!isRecord(envelope) || !isRecord(envelope.tool) || !isRecord(envelope.result)) {
+      throw new Error("Workshop dispatch did not return its canonical target receipt");
     }
-    expect(envelope.tool).toMatchObject({
-      id: "openclaw:core:skill_workshop",
-      name: "skill_workshop",
-      source: "openclaw",
-    });
+    expect(envelope.tool).toMatchObject({ name: "skill_workshop", source: "openclaw" });
+    expect(typeof call.arguments.id).toBe("string");
+    expect(call.arguments.id === envelope.tool.id || call.arguments.id === envelope.tool.name).toBe(
+      true,
+    );
+    expect(envelope.result.isError).not.toBe(true);
+    if (!Array.isArray(envelope.result.content)) {
+      throw new Error("Workshop target receipt did not retain its result content");
+    }
     workshopCalls.push({
-      action: isRecord(target.input) ? target.input.action : undefined,
-      receiptText: JSON.stringify(envelope.result),
+      action: call.arguments.args.action,
+      receiptText: envelope.result.content
+        .flatMap((part: unknown) =>
+          isRecord(part) && part.type === "text" && typeof part.text === "string"
+            ? [part.text]
+            : [],
+        )
+        .join("\n"),
     });
   }
   const mutations = workshopCalls.filter((call) =>

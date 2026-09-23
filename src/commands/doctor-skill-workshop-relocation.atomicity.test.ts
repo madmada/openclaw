@@ -23,7 +23,7 @@ import {
   type SkillProposalRecord,
   type SkillProposalRollback,
 } from "../skills/workshop/types.js";
-import { repairOpenClawStateDatabaseSchemaIfNeeded } from "../state/openclaw-state-db.js";
+import { prepareOpenClawStateDatabaseSchema } from "../state/openclaw-state-db.js";
 import {
   createOpenClawTestState,
   type OpenClawTestState,
@@ -256,7 +256,7 @@ describe("doctor Workshop relocation ownership and commit boundaries", () => {
         { record: created.record, workspaceDir, claimReleasedTime: null },
         { record: pending, workspaceDir, claimReleasedTime: null },
       ]);
-      repairOpenClawStateDatabaseSchemaIfNeeded({ env: testState.env });
+      await prepareOpenClawStateDatabaseSchema({ env: testState.env });
       if (state !== "unstarted") {
         await writeSkillProposalRollback({ proposalId: pending.id, rollback, store: options });
       }
@@ -434,7 +434,7 @@ describe("doctor Workshop relocation ownership and commit boundaries", () => {
       seedLegacyV15ProposalRows(testState.env, [
         { record: pending, workspaceDir, claimReleasedTime: null },
       ]);
-      repairOpenClawStateDatabaseSchemaIfNeeded({ env: testState.env });
+      await prepareOpenClawStateDatabaseSchema({ env: testState.env });
       await writeSkillProposalRollback({ proposalId: pending.id, rollback, store: options });
       expect((await readStoredProposal(pending.id, options))?.record).toEqual(pending);
       const destinationDir = path.join(

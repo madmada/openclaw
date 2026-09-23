@@ -22,6 +22,7 @@ import {
   getGatewayRestartDrainSignal,
   runWithGatewayDetachedWorkAdmission,
 } from "../../process/gateway-work-admission.js";
+import { isIncognitoSessionKey } from "../../routing/session-key.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
 import { bumpSkillsSnapshotVersion } from "../runtime/refresh-state.js";
 import { recordSkillExperienceReviewOutcome } from "./collection-review-state.js";
@@ -38,7 +39,10 @@ export async function prepareSkillExperienceReviewCandidate(
   candidate: ExperienceReviewCandidate,
   config: OpenClawConfig,
 ): Promise<ExperienceReviewCandidate | undefined> {
-  if (resolveSkillWorkshopConfig(config).autonomous.mode === "off") {
+  if (
+    isIncognitoSessionKey(candidate.source.sessionKey) ||
+    resolveSkillWorkshopConfig(config).autonomous.mode === "off"
+  ) {
     return undefined;
   }
   const { resolveConversationCapabilityProfile } =
