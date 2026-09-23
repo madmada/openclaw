@@ -1,6 +1,10 @@
 import type { Filter, Relay } from "nostr-tools";
 import { describe, expect, it, vi } from "vitest";
-import { openBuzzRelaySubscription } from "./relay-subscription.js";
+import {
+  BuzzRelaySubscriptionClosedError,
+  openBuzzRelaySubscription,
+  resolveBuzzRelayRetryDelayMs,
+} from "./relay-subscription.js";
 
 describe("openBuzzRelaySubscription", () => {
   it("sends an explicit REQ without synthesizing EOSE", async () => {
@@ -62,5 +66,40 @@ describe("openBuzzRelaySubscription", () => {
     await Promise.resolve();
 
     expect(close).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveBuzzRelayRetryDelayMs", () => {
+  const closed = (reason: string) =>
+    new BuzzRelaySubscriptionClosedError(
+      `Buzz room history query closed for room: ${reason}`,
+      reason,
+    );
+
+  it.each([
+    ["rate-limited: quota exceeded; retry in 2s", 2_000],
+    ["rate-limited: quota exceeded; retry in 3s", 3_000],
+    ["RATE-LIMITED: slow down; retry in 500ms", 500],
+    ["rate-limited: slow down", 2_000],
+    ["rate-limited: retry in 1m", 5_000],
+    ["rate-limited: retry in 0s", 2_000],
+  ])("treats %s as retryable after %ims", (reason, expected) => {
+    expect(resolveBuzzRelayRetryDelayMs(closed(reason))).toBe(expected);
+  });
+
+  it.each([
+    "relay rejected subscription",
+    "invalid: unknown filter",
+    "blocked: not a member",
+    "shutdown",
+    "connection closed while rate-limited: quota exceeded",
+  ])("does not retry %s", (reason) => {
+    expect(resolveBuzzRelayRetryDelayMs(closed(reason))).toBeUndefined();
+  });
+
+  it("does not retry an error that is not a relay subscription close", () => {
+    expect(
+      resolveBuzzRelayRetryDelayMs(new Error("rate-limited: quota exceeded; retry in 2s")),
+    ).toBeUndefined();
   });
 });

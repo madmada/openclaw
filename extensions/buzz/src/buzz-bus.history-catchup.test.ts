@@ -16,6 +16,8 @@ const relayMocks = vi.hoisted(() => ({
   historyRequests: [] as Filter[],
   historySubscriptionCloses: 0,
   closeHistoryPagesReason: undefined as string | undefined,
+  closeHistoryPagesLimit: undefined as number | undefined,
+  historyPageCloses: 0,
   overReturnHistoryPages: false,
   stallHistoryPages: false,
 }));
@@ -91,7 +93,13 @@ vi.mock("nostr-tools", async (importOriginal) => {
           for (const event of selectRelayEvents(filter)) {
             handlers.onevent(event);
           }
-          if (relayMocks.closeHistoryPagesReason && isHistoryPage) {
+          if (
+            relayMocks.closeHistoryPagesReason &&
+            isHistoryPage &&
+            (relayMocks.closeHistoryPagesLimit === undefined ||
+              relayMocks.historyPageCloses < relayMocks.closeHistoryPagesLimit)
+          ) {
+            relayMocks.historyPageCloses += 1;
             queueMicrotask(() => {
               handlers.onclose(relayMocks.closeHistoryPagesReason ?? "relay closed");
             });
@@ -125,7 +133,7 @@ vi.mock("nostr-tools", async (importOriginal) => {
 });
 
 import { startBuzzBus } from "./buzz-bus.js";
-import { catchUpBuzzRoomHistory } from "./history-catchup.js";
+import { BUZZ_HISTORY_RATE_LIMIT_MAX_RETRIES, catchUpBuzzRoomHistory } from "./history-catchup.js";
 import {
   BUZZ_REPLAY_DISPATCH_MAX_PENDING,
   createBuzzReplayDispatchQueue,
@@ -186,6 +194,8 @@ describe("Buzz reconnect history catch-up", () => {
     relayMocks.historyRequests.length = 0;
     relayMocks.historySubscriptionCloses = 0;
     relayMocks.closeHistoryPagesReason = undefined;
+    relayMocks.closeHistoryPagesLimit = undefined;
+    relayMocks.historyPageCloses = 0;
     relayMocks.overReturnHistoryPages = false;
     relayMocks.stallHistoryPages = false;
     relayMocks.storedEvents = [
@@ -410,6 +420,71 @@ describe("Buzz reconnect history catch-up", () => {
 
     expect(fatalErrors).toEqual([
       `Buzz room history query closed for ${CHANNEL_ID}: relay rejected subscription`,
+    ]);
+    expect(relayMocks.close).toHaveBeenCalled();
+  });
+
+  it("retries a rate-limited catch-up page instead of failing the bus", async () => {
+    const backlog = HISTORY_LIMIT + 1;
+    seedOfflineBacklog(backlog, (index) => BASE_TIMESTAMP + index);
+    relayMocks.closeHistoryPagesReason = "rate-limited: quota exceeded; retry in 5ms";
+    relayMocks.closeHistoryPagesLimit = BUZZ_HISTORY_RATE_LIMIT_MAX_RETRIES;
+    const fatalErrors: string[] = [];
+    const historyErrors: string[] = [];
+    const received: string[] = [];
+
+    const bus = await startBuzzBus({
+      accountId: ACCOUNT_ID,
+      relayUrl: "wss://buzz.example.com",
+      privateKey: PRIVATE_KEY,
+      channelIds: [CHANNEL_ID],
+      since: () => BASE_TIMESTAMP - 60,
+      onMessage: async (message) => {
+        received.push(message.text);
+      },
+      onFatalError: (error) => {
+        fatalErrors.push(error.message);
+      },
+      onHistoryError: (error) => {
+        historyErrors.push(error.message);
+      },
+    });
+    await waitForSettled(() => received.length >= backlog);
+    const relayClosesDuringCatchUp = relayMocks.close.mock.calls.length;
+    await bus.close();
+
+    expect(relayMocks.historyPageCloses).toBe(BUZZ_HISTORY_RATE_LIMIT_MAX_RETRIES);
+    expect(fatalErrors).toEqual([]);
+    expect(historyErrors).toEqual([]);
+    expect(relayClosesDuringCatchUp).toBe(0);
+    // A discarded attempt must not replay its events a second time.
+    expect(received).toHaveLength(new Set(received).size);
+    expect(received).toHaveLength(backlog);
+  });
+
+  it("fails the bus when rate-limited catch-up retries are exhausted", async () => {
+    seedOfflineBacklog(HISTORY_LIMIT + 1, (index) => BASE_TIMESTAMP + index);
+    relayMocks.closeHistoryPagesReason = "rate-limited: quota exceeded; retry in 5ms";
+    relayMocks.closeHistoryPagesLimit = BUZZ_HISTORY_RATE_LIMIT_MAX_RETRIES + 1;
+    const fatalErrors: string[] = [];
+
+    const bus = await startBuzzBus({
+      accountId: ACCOUNT_ID,
+      relayUrl: "wss://buzz.example.com",
+      privateKey: PRIVATE_KEY,
+      channelIds: [CHANNEL_ID],
+      since: () => BASE_TIMESTAMP - 60,
+      onMessage: async () => {},
+      onFatalError: (error) => {
+        fatalErrors.push(error.message);
+      },
+    });
+    await waitForSettled(() => fatalErrors.length > 0);
+    await bus.close();
+
+    expect(relayMocks.historyPageCloses).toBe(BUZZ_HISTORY_RATE_LIMIT_MAX_RETRIES + 1);
+    expect(fatalErrors).toEqual([
+      `Buzz room history query closed for ${CHANNEL_ID}: rate-limited: quota exceeded; retry in 5ms`,
     ]);
     expect(relayMocks.close).toHaveBeenCalled();
   });
