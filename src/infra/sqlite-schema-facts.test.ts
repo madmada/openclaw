@@ -1,19 +1,27 @@
+import path from "node:path";
 import { constants, DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { assertSupportedAgentSchemaVersion } from "../state/openclaw-agent-db-schema-read.js";
 import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
-import { enableNodeSqliteKyselyStatementCache } from "./kysely-sync-cache-state.js";
+import {
+  enableNodeSqliteKyselyStatementCache,
+  registerNodeSqliteDisposeCallback,
+} from "./kysely-sync-cache-state.js";
 import { openNodeSqliteDatabase } from "./node-sqlite.js";
+import { runSqlitePinnedReadSnapshotSync } from "./sqlite-pinned-read-snapshot.js";
 import { admitSqliteSchema } from "./sqlite-schema-facts.js";
 
 describe("admitted SQLite schema facts", () => {
+  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
   const databases: DatabaseSync[] = [];
 
   function openDatabase(
     schema = "CREATE TABLE original (id INTEGER); PRAGMA user_version = 1;",
     admitted = true,
+    location = ":memory:",
   ) {
-    const database = openNodeSqliteDatabase(":memory:");
+    const database = openNodeSqliteDatabase(location);
     databases.push(database);
     database.exec(schema);
     enableNodeSqliteKyselyStatementCache(database);
@@ -29,6 +37,49 @@ describe("admitted SQLite schema facts", () => {
         database.close();
       }
     }
+  });
+
+  it("publishes local DDL to sibling handles while preserving their active snapshots", () => {
+    const filename = path.join(tempDirs.make("openclaw-schema-siblings-"), "state.sqlite");
+    const writer = openDatabase(undefined, true, filename);
+    writer.exec("PRAGMA journal_mode=WAL");
+    const reader = openDatabase("", true, filename);
+    expect(tableExists(reader, "committed")).toBe(false);
+    writer.exec("BEGIN; CREATE TABLE committed (id)");
+    expect(tableExists(reader, "committed")).toBe(false);
+    writer.exec("COMMIT");
+    expect(tableExists(reader, "committed")).toBe(true);
+
+    reader.exec("BEGIN");
+    reader.prepare("SELECT id FROM original").all();
+    writer.exec("CREATE TABLE later (id)");
+    expect(tableExists(reader, "later")).toBe(false);
+    reader.exec("COMMIT");
+    expect(tableExists(reader, "later")).toBe(true);
+
+    writer.exec("BEGIN; CREATE TABLE retained_after_close_failure (id)");
+    const unregister = registerNodeSqliteDisposeCallback(writer, () => {
+      throw new Error("synthetic close refusal");
+    });
+    try {
+      expect(() => writer.close()).toThrow("synthetic close refusal");
+    } finally {
+      unregister();
+    }
+    writer.exec("COMMIT");
+    expect(tableExists(reader, "retained_after_close_failure")).toBe(true);
+
+    expect(tableExists(reader, "batched")).toBe(false);
+    writer.exec("BEGIN; CREATE TABLE batched (id)");
+    writer.exec("COMMIT; BEGIN");
+    expect(tableExists(reader, "batched")).toBe(true);
+    writer.exec("ROLLBACK");
+
+    runSqlitePinnedReadSnapshotSync(reader, () => {
+      writer.exec("CREATE TABLE implicit_snapshot (id)");
+      expect(tableExists(reader, "implicit_snapshot")).toBe(false);
+    });
+    expect(tableExists(reader, "implicit_snapshot")).toBe(true);
   });
 
   it("tracks transactional DDL through savepoint cookie reuse, rollback, and commit", () => {

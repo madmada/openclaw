@@ -149,7 +149,7 @@ export function openNodeSqliteDatabase(
     options === undefined
       ? new sqlite.DatabaseSync(resolvedLocation)
       : new sqlite.DatabaseSync(resolvedLocation, options);
-  trackSqliteSchema(database);
+  trackSqliteSchema(database, sqlite);
   registerSqliteReaderConnection(database);
   return database;
 }

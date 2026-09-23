@@ -4,7 +4,13 @@ import {
   executeWithCachedStatement,
   registerNodeSqliteDisposeCallback,
 } from "./kysely-sync-cache-state.js";
-import { runSqlitePinnedReadSnapshotSync } from "./sqlite-transaction.js";
+import {
+  getSqlitePinnedReadSnapshot,
+  runSqlitePinnedReadSnapshotSync,
+} from "./sqlite-pinned-read-snapshot.js";
+import { readDatabasePathIdentitySync } from "./sqlite-worker-identity.js";
+
+type NativeSqlite = Pick<typeof import("node:sqlite"), "DatabaseSync" | "StatementSync">;
 
 export type SqliteSchemaFacts = {
   readonly revision: number;
@@ -20,8 +26,25 @@ type SchemaOwner = {
   dataVersion?: number;
   probed: boolean;
   transactionalSchema: boolean;
+  transactionalFacts: boolean;
+  snapshot?: object;
   authorizerActive: boolean;
+  scope?: SchemaScope;
+  scopeRevision?: number;
 };
+
+type SchemaScope = { key?: string; revision: number; users: number };
+
+const scopes = resolveGlobalSingleton(Symbol.for("openclaw.sqliteSchemaScopes"), () => {
+  const byIdentity = new Map<string, SchemaScope>();
+  const release = (scope: SchemaScope) => {
+    scope.users -= 1;
+    if (scope.users === 0 && scope.key && byIdentity.get(scope.key) === scope) {
+      byIdentity.delete(scope.key);
+    }
+  };
+  return { byIdentity, release, finalizer: new FinalizationRegistry(release) };
+});
 
 const owners = resolveGlobalSingleton(
   Symbol.for("openclaw.sqliteSchemaFacts"),
@@ -33,19 +56,47 @@ function invalidate(owner: SchemaOwner): void {
   owner.facts = undefined;
 }
 
+function bindScope(database: DatabaseSync, owner: SchemaOwner): SchemaScope {
+  if (owner.scope) {
+    return owner.scope;
+  }
+  const location = database.location();
+  const key = location ? readDatabasePathIdentitySync(location).key : undefined;
+  const scope = (key && scopes.byIdentity.get(key)) || { key, revision: 0, users: 0 };
+  if (key) {
+    scopes.byIdentity.set(key, scope);
+  }
+  scope.users += 1;
+  owner.scope = scope;
+  owner.scopeRevision = scope.revision;
+  scopes.finalizer.register(database, scope, owner);
+  return scope;
+}
+
+function publishSchemaChange(database: DatabaseSync, owner: SchemaOwner): void {
+  const scope = bindScope(database, owner);
+  scope.revision += 1;
+  owner.scopeRevision = scope.revision;
+}
+
 /** Schema publications outside DDL (such as a deferred version marker) share this revision. */
 export function invalidateSqliteSchemaFacts(database: DatabaseSync): void {
   const owner = owners.get(database);
   if (owner) {
+    // Capture physical identity before DDL, while the caller owns cleanup on admission failure.
+    bindScope(database, owner);
     invalidate(owner);
     owner.transactionalSchema ||= database.isTransaction;
+    if (!database.isTransaction) {
+      publishSchemaChange(database, owner);
+    }
   }
 }
 
 // Conservative matching also covers multi-statement migration batches and catalog repairs.
 // False positives only revoke prepared facts; SQL is still executed by SQLite unchanged.
 function changesSchema(sql: string): boolean {
-  return /\b(?:CREATE|ALTER|DROP|REINDEX|VACUUM|ROLLBACK)\b|\bPRAGMA\b[\s\S]*\b(?:user_version|schema_version|writable_schema)\b[\s\S]*[=(]/i.test(
+  return /\b(?:CREATE|ALTER|DROP|REINDEX|VACUUM)\b|\bPRAGMA\b[\s\S]*\b(?:user_version|schema_version|writable_schema)\b[\s\S]*[=(]/i.test(
     sql,
   );
 }
@@ -66,56 +117,103 @@ function callStatement<Result>(
   return method(first, ...remaining);
 }
 
-function trackSchemaChanges(database: DatabaseSync, owner: SchemaOwner): void {
-  const settle = () => {
-    if (owner.transactionalSchema && !database.isTransaction) {
+function trackSchemaChanges(
+  database: DatabaseSync,
+  owner: SchemaOwner,
+  native: NativeSqlite,
+): void {
+  const settle = (boundary = false) => {
+    if (
+      (boundary || !database.isTransaction) &&
+      (owner.transactionalSchema || owner.transactionalFacts)
+    ) {
+      if (owner.transactionalSchema) {
+        // A local first-use writer must publish to already-admitted sibling connections.
+        publishSchemaChange(database, owner);
+      }
       invalidate(owner);
-      owner.transactionalSchema = false;
+      // A batch may commit one transaction and leave another containing DDL open.
+      owner.transactionalSchema &&= database.isTransaction;
+      owner.transactionalFacts = false;
     }
   };
-  const execute = <T>(operation: () => T, schemaChange: boolean): T => {
+  const execute = <T>(
+    operation: () => T,
+    schemaChange: boolean,
+    rollback: boolean,
+    boundary: boolean,
+  ): T => {
+    if (owner.transactionalSchema && !owner.scope) {
+      bindScope(database, owner);
+    }
     // An implicit rollback may be followed by BEGIN before the next schema read.
     settle();
-    if (schemaChange) {
+    const invalidates = schemaChange || (rollback && owner.transactionalSchema);
+    if (invalidates) {
       invalidateSqliteSchemaFacts(database);
     }
     try {
       return operation();
     } finally {
       // A failed batch can already have changed schema; rollback can reuse SQLite's cookie.
-      if (schemaChange) {
+      if (invalidates) {
         invalidateSqliteSchemaFacts(database);
       }
-      settle();
+      settle(boundary);
     }
   };
-  const exec = database.exec.bind(database);
-  database.exec = (sql) => execute(() => exec(sql), changesSchema(sql));
-  const prepare = database.prepare.bind(database);
-  database.prepare = (...args) => {
-    const [sql] = args;
-    const statement = prepare(...args);
+  // Keep native prototype instrumentation visible after a connection or statement is retained.
+  database.exec = (sql) =>
+    execute(
+      () => native.DatabaseSync.prototype.exec.call(database, sql),
+      changesSchema(sql),
+      /\bROLLBACK\b/i.test(sql),
+      /\b(?:BEGIN|SAVEPOINT|COMMIT|END|RELEASE|ROLLBACK)\b/i.test(sql),
+    );
+  database.prepare = (...prepareArgs) => {
+    const [sql] = prepareArgs;
+    const statement = native.DatabaseSync.prototype.prepare.call(database, ...prepareArgs);
     const schemaChange = changesSchema(sql);
-    if (schemaChange || /\b(?:BEGIN|SAVEPOINT|COMMIT|END|RELEASE)\b/i.test(sql)) {
-      const run = statement.run.bind(statement);
-      const get = statement.get.bind(statement);
-      const all = statement.all.bind(statement);
-      const iterate = statement.iterate.bind(statement);
-      statement.run = (...args) => execute(() => callStatement(run, args), schemaChange);
-      statement.get = (...args) => execute(() => callStatement(get, args), schemaChange);
-      statement.all = (...args) => execute(() => callStatement(all, args), schemaChange);
-      statement.iterate = function* (...args) {
+    const rollback = /\bROLLBACK\b/i.test(sql);
+    const boundary = /\b(?:BEGIN|SAVEPOINT|COMMIT|END|RELEASE|ROLLBACK)\b/i.test(sql);
+    if (schemaChange || boundary) {
+      statement.run = (...bindings) =>
+        execute(
+          () => callStatement(native.StatementSync.prototype.run.bind(statement), bindings),
+          schemaChange,
+          rollback,
+          boundary,
+        );
+      statement.get = (...bindings) =>
+        execute(
+          () => callStatement(native.StatementSync.prototype.get.bind(statement), bindings),
+          schemaChange,
+          rollback,
+          boundary,
+        );
+      statement.all = (...bindings) =>
+        execute(
+          () => callStatement(native.StatementSync.prototype.all.bind(statement), bindings),
+          schemaChange,
+          rollback,
+          boundary,
+        );
+      statement.iterate = function* (...bindings) {
+        if (owner.transactionalSchema && !owner.scope) {
+          bindScope(database, owner);
+        }
         settle();
-        if (schemaChange) {
+        const invalidates = schemaChange || (rollback && owner.transactionalSchema);
+        if (invalidates) {
           invalidateSqliteSchemaFacts(database);
         }
         try {
-          yield* callStatement(iterate, args);
+          yield* callStatement(native.StatementSync.prototype.iterate.bind(statement), bindings);
         } finally {
-          if (schemaChange) {
+          if (invalidates) {
             invalidateSqliteSchemaFacts(database);
           }
-          settle();
+          settle(boundary);
         }
         return undefined;
       };
@@ -123,9 +221,8 @@ function trackSchemaChanges(database: DatabaseSync, owner: SchemaOwner): void {
     return statement;
   };
   if (typeof database.setAuthorizer === "function") {
-    const setAuthorizer = database.setAuthorizer.bind(database);
     database.setAuthorizer = (callback) => {
-      setAuthorizer(callback);
+      native.DatabaseSync.prototype.setAuthorizer.call(database, callback);
       owner.authorizerActive = callback !== null;
       invalidate(owner);
     };
@@ -134,6 +231,13 @@ function trackSchemaChanges(database: DatabaseSync, owner: SchemaOwner): void {
     invalidate(owner);
     owner.dataVersion = undefined;
     owner.probed = false;
+    // Native close can still fail; transaction settlement retains pending DDL publication.
+    if (owner.scope) {
+      scopes.finalizer.unregister(owner);
+      scopes.release(owner.scope);
+      owner.scope = undefined;
+      owner.scopeRevision = undefined;
+    }
   });
 }
 
@@ -167,17 +271,18 @@ export function readSqliteCacheDataVersion(database: DatabaseSync): number {
 }
 
 /** Install at native open, before callers can retain statements or install an authorizer. */
-export function trackSqliteSchema(database: DatabaseSync): void {
+export function trackSqliteSchema(database: DatabaseSync, native: NativeSqlite): void {
   if (!owners.has(database)) {
     const owner: SchemaOwner = {
       admitted: false,
       revision: 0,
       probed: false,
       transactionalSchema: false,
+      transactionalFacts: false,
       authorizerActive: false,
     };
     owners.set(database, owner);
-    trackSchemaChanges(database, owner);
+    trackSchemaChanges(database, owner, native);
   }
 }
 
@@ -201,11 +306,27 @@ export function getAdmittedSqliteSchemaFacts(
     return undefined;
   }
   readSqliteCacheDataVersion(database);
-  if (owner.transactionalSchema && !database.isTransaction) {
+  const snapshot = getSqlitePinnedReadSnapshot(database);
+  if (owner.snapshot && owner.snapshot !== snapshot) {
+    invalidate(owner);
+    owner.snapshot = undefined;
+  }
+  const scope = bindScope(database, owner);
+  if (owner.scopeRevision !== scope.revision) {
+    invalidate(owner);
+    owner.scopeRevision = scope.revision;
+  }
+  if ((owner.transactionalSchema || owner.transactionalFacts) && !database.isTransaction) {
+    if (owner.transactionalSchema) {
+      publishSchemaChange(database, owner);
+    }
     invalidate(owner);
     owner.transactionalSchema = false;
+    owner.transactionalFacts = false;
   }
   if (!owner.facts) {
+    owner.snapshot = snapshot;
+    owner.transactionalFacts = database.isTransaction;
     owner.facts = runSqlitePinnedReadSnapshotSync(database, () => {
       const userVersion = executeWithCachedStatement(database, "PRAGMA user_version", [], (s) =>
         s.get(),
