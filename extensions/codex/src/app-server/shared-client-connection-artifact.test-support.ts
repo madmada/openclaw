@@ -78,7 +78,12 @@ async function withRemoteServer(
   let codexHome = "/remote/codex-home";
   server.on("connection", (socket) => {
     socket.on("message", (data) => {
-      const request = JSON.parse(data.toString()) as { id?: number; method: string };
+      const bytes = Array.isArray(data)
+        ? Buffer.concat(data)
+        : data instanceof ArrayBuffer
+          ? Buffer.from(data)
+          : data;
+      const request = JSON.parse(bytes.toString("utf8")) as { id?: number; method: string };
       if (request.id === undefined) {
         return;
       }
@@ -123,8 +128,8 @@ async function withRemoteServer(
     });
   } finally {
     await Promise.all(clients.map((client) => client.closeAndWait()));
-    await new Promise<void>((resolve, reject) =>
-      server.close((error) => (error ? reject(error) : resolve())),
-    );
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
   }
 }
