@@ -57,6 +57,25 @@ describe("native CLI selection", () => {
     expect(matchesVitestCliSelection(file, include, ["run", file], "", {})).toBe(selected);
   });
 
+  const infraFile = "src/infra/sqlite-worker-operation-attachment.test.ts";
+  const absoluteInfra = path.resolve(import.meta.dirname, "../..", infraFile);
+  it.each([
+    { include: ["src/infra/**/*.test.ts"], candidate: absoluteInfra, selected: true },
+    { include: [absoluteInfra], candidate: infraFile, selected: true },
+    { include: ["extensions/qa-lab/**/*.test.ts"], candidate: absoluteInfra, selected: false },
+    { include: [absoluteInfra], candidate: path.resolve("../outside.test.ts"), selected: false },
+  ])(
+    "intersects CLI $candidate with its actual owner $include",
+    ({ include, candidate, selected }) => {
+      expect(narrowIncludePatternsForCli(include, ["node", "vitest", "run", candidate])).toEqual(
+        selected ? [candidate] : [],
+      );
+      expect(matchesVitestCliSelection(infraFile, include, ["run", candidate], "", {})).toBe(
+        selected,
+      );
+    },
+  );
+
   const file = "extensions/qa-lab/src/suite-process-lifecycle.test.ts";
   it.each([
     { args: ["--configLoader", "runner"], selected: true },

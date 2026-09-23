@@ -186,7 +186,10 @@ export function narrowIncludePatternsForCli(
     return null;
   }
 
-  return narrowIncludePatterns(includePatterns, cliPatterns, matchesVitestGlob);
+  // CLI operands may be absolute while canonical project ownership is repo-relative.
+  return narrowIncludePatterns(includePatterns, cliPatterns, (value, pattern) =>
+    matchesVitestGlob(path.resolve(repoRoot, value), path.resolve(repoRoot, pattern)),
+  );
 }
 
 export function relativizeScopedPatterns(values: readonly string[], dir = ""): string[] {
