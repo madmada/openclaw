@@ -76,6 +76,49 @@ describe("native CLI selection", () => {
     },
   );
 
+  it("keeps absolute Windows operands selected after discovery", async () => {
+    const windowsPath = {
+      ...path.win32,
+      resolve: (...parts: string[]) => path.win32.resolve("C:\\", ...parts),
+    };
+    const candidate = windowsPath
+      .resolve(import.meta.dirname, "../..", infraFile)
+      .replaceAll("\\", "/");
+    vi.resetModules();
+    vi.doMock("node:path", () => ({ default: windowsPath }));
+    try {
+      const selector = await import("./vitest.pattern-file.ts");
+      const include = ["src/infra/**/*.test.ts"];
+      expect(
+        selector.narrowIncludePatternsForCli(include, ["node", "vitest", "run", candidate]),
+      ).toEqual([candidate]);
+      expect(
+        selector.matchesVitestCliSelection(infraFile, include, ["run", candidate], "", {}),
+      ).toBe(true);
+      expect(
+        selector.matchesVitestCliSelection(
+          infraFile,
+          include,
+          ["run", candidate, "--exclude", infraFile],
+          "",
+          {},
+        ),
+      ).toBe(false);
+      expect(
+        selector.matchesVitestCliSelection(
+          infraFile,
+          ["extensions/qa-lab/**/*.test.ts"],
+          ["run", candidate],
+          "",
+          {},
+        ),
+      ).toBe(false);
+    } finally {
+      vi.doUnmock("node:path");
+      vi.resetModules();
+    }
+  });
+
   const file = "extensions/qa-lab/src/suite-process-lifecycle.test.ts";
   it.each([
     { args: ["--configLoader", "runner"], selected: true },
