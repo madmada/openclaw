@@ -217,7 +217,9 @@ async function withSessionStoreReaderInWorker<T>(
             continuation?.assertCurrent();
             assertRoute();
           };
-          if (dataOnly) assertFinalCurrent = assertCapturedCurrent;
+          if (dataOnly) {
+            assertFinalCurrent = assertCapturedCurrent;
+          }
           const assertCurrent = () => {
             if (!active) {
               throw new Error("Session entry read consumer is no longer active");
