@@ -196,7 +196,7 @@ async function loadArtifactSidebarContent(
 export function refreshSessionWorkspace(state: SessionWorkspaceHost, refreshFiles: boolean) {
   if (refreshSessionWorkspaceState(state, refreshFiles)) {
     state.sidebarContent = resolveSessionDiffSidebarContent(state);
-    requestWorkspaceUpdate(state);
+    state.requestUpdate?.();
   }
 }
 
