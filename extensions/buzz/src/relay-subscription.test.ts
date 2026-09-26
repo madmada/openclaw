@@ -109,7 +109,9 @@ describe("resolveBuzzRelayRetryDelayMs", () => {
     ["rate-limited: quota exceeded; retry in 3s", 3_000],
     ["RATE-LIMITED: slow down; retry in 500ms", 500],
     ["rate-limited: slow down", 2_000],
-    ["rate-limited: retry in 1m", 5_000],
+    ["rate-limited: retry in 1m", 60_000],
+    ["rate-limited: retry in 90s", 90_000],
+    ["rate-limited: retry in 10m", 300_000],
     ["rate-limited: retry in 0s", 2_000],
   ])("treats %s as retryable after %ims", async (reason, expected) => {
     expect(resolveBuzzRelayRetryDelayMs(await closedByRelay(reason))).toBe(expected);

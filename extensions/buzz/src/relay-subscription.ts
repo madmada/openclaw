@@ -13,7 +13,10 @@ const BUZZ_RELAY_RETRY_HINT_UNIT_MS: Record<string, number> = {
   m: 60_000,
 };
 const BUZZ_RELAY_RATE_LIMIT_DEFAULT_RETRY_MS = 2_000;
-const BUZZ_RELAY_RATE_LIMIT_MAX_RETRY_MS = 5_000;
+// Retrying before the relay's own window clears only spends the retry budget, so honor
+// the hint. The ceiling guards against a malformed hint parking catch-up for hours;
+// callers wait on an abortable timer, so closing the bus never waits this long.
+const BUZZ_RELAY_RATE_LIMIT_MAX_RETRY_MS = 5 * 60_000;
 
 /** A relay CLOSED frame for one subscription. The connection itself stays up. */
 class BuzzRelaySubscriptionClosedError extends Error {
